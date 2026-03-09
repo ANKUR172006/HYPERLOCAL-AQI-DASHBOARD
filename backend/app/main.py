@@ -1,0 +1,47 @@
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.v1 import router as v1_router
+from app.core.config import settings
+from app.core.errors import AppError, app_error_handler
+from app.core.logging import configure_logging
+from app.db.session import SessionLocal, init_db
+from app.jobs.pipeline_jobs import run_pipeline_cycle
+from app.jobs.scheduler import maybe_start_scheduler, stop_scheduler
+from app.services.pipeline import PipelineService
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    configure_logging()
+    init_db()
+    db = SessionLocal()
+    try:
+        PipelineService(db).bootstrap_city_and_wards()
+        run_pipeline_cycle(db)
+    finally:
+        db.close()
+    maybe_start_scheduler()
+    yield
+    stop_scheduler()
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title=settings.app_name, version=settings.app_version, lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    app.add_exception_handler(AppError, app_error_handler)
+    app.include_router(v1_router, prefix=settings.api_prefix)
+    return app
+
+
+app = create_app()
