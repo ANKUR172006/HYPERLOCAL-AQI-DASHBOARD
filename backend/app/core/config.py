@@ -14,8 +14,13 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     celery_broker_url: str = "redis://localhost:6379/1"
     enable_scheduler: bool = True
-    enable_extended_ingestion: bool = True
-    cpcb_source_mode: str = "api"
+    # Default off: keeps startup fast and avoids flaky network calls.
+    enable_extended_ingestion: bool = False
+    # Default off: XGBoost training on every pipeline cycle can be slow on laptops.
+    enable_xgboost_forecasting: bool = False
+    # Default to bundled sample CSV to keep the prototype fast and deterministic.
+    # Set `CPCB_SOURCE_MODE=api` (or `hybrid`) to enable live pulls.
+    cpcb_source_mode: str = "file"
     cpcb_file_path: str = "data/cpcb_delhi_sample.csv"
     cpcb_api_url: str = "/resource/3b01bcb8-0b14-4abf-b6f2-c1bfd384ba69"
     cpcb_api_key: str | None = "579b464db66ec23bdd00000198e9d1e526964f3a6cb6537f1dd9756d"

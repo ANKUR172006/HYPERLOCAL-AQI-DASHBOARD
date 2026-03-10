@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: aqi-backend
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /v1/health
+    envVars:
+      - key: CPCB_SOURCE_MODE
+        value: file
+      - key: ENABLE_EXTENDED_INGESTION
+        value: "false"
+      - key: ENABLE_XGBOOST_FORECASTING
+        value: "false"
+      - key: CPCB_API_KEY
+        sync: false
+      - key: NASA_API_KEY
+        sync: false
+
+  - type: web
+    name: aqi-frontend
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: frontend/dist
+    envVars:
+      - key: VITE_API_BASE
+        # Set this to your backend URL after the backend service is created.
+        # Example: https://aqi-backend.onrender.com/v1
+        sync: false

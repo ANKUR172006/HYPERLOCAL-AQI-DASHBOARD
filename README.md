@@ -13,7 +13,7 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 Backend pipeline now follows:
 `Data Sources -> Ingestion -> Cleaning/Validation -> IDW -> CPCB AQI -> AI Forecasting -> Hybrid Crisis Detection -> Early Warning -> DB -> API`.
 
-Default source mode is CPCB API (`api`). If API is unavailable, pipeline falls back to synthetic station generation.
+Default source mode is the bundled sample file (`file`). Switch to CPCB API (`api`) for live pulls (or `hybrid` for best-effort API with file fallback).
 
 Optional environment variables for live feed wiring:
 
@@ -25,6 +25,13 @@ $env:CPCB_API_KEY=""
 ```
 
 Install `xgboost` to enable true XGBoost forecasts; without it, backend uses a momentum fallback model.
+
+Optional environment toggles:
+
+```powershell
+$env:ENABLE_EXTENDED_INGESTION="false"   # default: false (avoids external API calls on startup)
+$env:ENABLE_XGBOOST_FORECASTING="true"   # default: false (XGBoost training can be slow)
+```
 
 Backend base URL: `http://127.0.0.1:8000/v1`
 
@@ -77,3 +84,4 @@ These enrich CPCB ingestion with:
 - Nominatim location intelligence
 
 `ENABLE_EXTENDED_INGESTION=true` is enabled by default for continuous multi-source ingestion.
+`ENABLE_EXTENDED_INGESTION` is off by default; enable it only when you want live external enrichment.

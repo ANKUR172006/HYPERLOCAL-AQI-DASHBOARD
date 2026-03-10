@@ -251,13 +251,18 @@ class PipelineService:
         return snapshots
 
     def _ai_forecasting_xgboost_layer(self, rows: list[WardObservation], snapshots: list[AqiSnapshot]) -> None:
-        model_name = "xgboost"
-        model_version = "xgb-h-v2"
-        predictions = self._xgboost_predict(rows, snapshots)
-        if predictions is None:
-            model_name = "xgboost-fallback"
+        if not settings.enable_xgboost_forecasting:
+            model_name = "momentum-fallback"
             model_version = "fallback-v1"
             predictions = self._momentum_fallback(rows)
+        else:
+            model_name = "xgboost"
+            model_version = "xgb-h-v2"
+            predictions = self._xgboost_predict(rows, snapshots)
+            if predictions is None:
+                model_name = "xgboost-fallback"
+                model_version = "fallback-v1"
+                predictions = self._momentum_fallback(rows)
 
         for ward_id, horizon_map in predictions.items():
             for horizon, aqi_pred in horizon_map.items():

@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.core.errors import AppError
 from app.core.config import settings
 from app.db.session import get_db
-from app.models.entities import AqiSnapshot, Complaint, CrisisEvent, ForecastSnapshot, Ward
+from app.models.entities import AqiSnapshot, City, Complaint, CrisisEvent, ForecastSnapshot, Ward
 from app.services.cpcb_source import CpcbSource
 from app.services.collectors.http_client import get_recent_api_checks
 from app.services.environmental_ingestion_service import EnvironmentalIngestionService
@@ -156,6 +156,92 @@ def envelope(ward_id: str | None, data: dict, disaster_mode: bool, quality_score
         "data_quality": {"score": quality_score, "flag": "OK" if quality_score >= 0.8 else "LOW"},
         "data": data,
     }
+
+
+def _ensure_city(db: Session, city_id: str) -> str:
+    cid = _sanitize_city_id(city_id)
+    city = db.get(City, cid)
+    if city is None:
+        city = City(city_id=cid, city_name=cid.title(), state_name="Unknown", timezone="Asia/Kolkata")
+        db.add(city)
+        db.commit()
+    return cid
+
+
+def _persist_dynamic_grid(db: Session, city_id: str, rows: list[dict]) -> None:
+    if not rows:
+        return
+    cid = _ensure_city(db, city_id)
+    now = datetime.now(timezone.utc)
+    quality = 0.83
+
+    for row in rows:
+        ward_id = str(row.get("ward_id") or "").strip()
+        if not ward_id:
+            continue
+        ward_name = str(row.get("ward_name") or ward_id).strip()
+
+        ward = db.get(Ward, ward_id)
+        if ward is None:
+            db.add(Ward(ward_id=ward_id, city_id=cid, ward_name=ward_name, population=50000, sensitive_sites_count=3))
+
+        pm25 = float(row.get("pm25") or 0.0)
+        pm10 = float(row.get("pm10") or 0.0)
+        no2 = float(row.get("no2") or 0.0)
+        so2 = float(row.get("so2") or 0.0)
+        o3 = float(row.get("o3") or 0.0)
+        co = float(row.get("co") or 0.0)
+
+        indices = {
+            "PM2.5": calc_sub_index(pm25, "pm25"),
+            "PM10": calc_sub_index(pm10, "pm10"),
+            "NO2": calc_sub_index(no2, "no2"),
+            "SO2": calc_sub_index(so2, "so2"),
+            "O3": calc_sub_index(o3, "o3"),
+            "CO": calc_sub_index(co, "co"),
+        }
+        denom = float(sum(indices.values()) or 1.0)
+        contrib_pct = {k: round((v / denom) * 100.0, 1) for k, v in indices.items()}
+        primary = str(row.get("primary_pollutant") or max(indices, key=indices.get))
+        aqi = int(row.get("aqi") or indices.get(primary, 120))
+
+        db.add(
+            AqiSnapshot(
+                ts_utc=now,
+                ward_id=ward_id,
+                aqi_value=aqi,
+                aqi_category=aqi_category(aqi),
+                primary_pollutant=primary,
+                pmi_value=0.0,
+                contribution_json={
+                    **contrib_pct,
+                    "raw": {"pm25": pm25, "pm10": pm10, "no2": no2, "so2": so2, "o3": o3, "co": co},
+                    "centroid": {"lat": row.get("centroid_lat"), "lon": row.get("centroid_lon")},
+                },
+                calc_rule_version="dynamic-idw-v1",
+                data_quality_score=quality,
+                data_quality_flag="OK",
+            )
+        )
+
+        momentum = round((pm25 / 4 + pm10 / 10 + no2 / 6) / 10)
+        for horizon in (1, 2, 3):
+            pred = max(0, min(500, aqi + horizon * momentum))
+            db.add(
+                ForecastSnapshot(
+                    ward_id=ward_id,
+                    horizon_hour=horizon,
+                    target_ts_utc=now + timedelta(hours=horizon),
+                    aqi_pred=int(pred),
+                    aqi_category_pred=aqi_category(int(pred)),
+                    model_name="dynamic-momentum",
+                    model_version="v1",
+                    data_quality_score=quality,
+                    disaster_mode=int(pred) > 300,
+                )
+            )
+
+    db.commit()
 
 
 def severity_from_level(level: str) -> str:
@@ -338,6 +424,7 @@ def ward_map_data(city_id: str = "DELHI", lat: float | None = None, lon: float |
     # Dynamic, location-centered IDW wards for non-seeded cities.
     if not rows and lat is not None and lon is not None:
         rows = _idw_rows_for_location(city_id=city_id, lat=lat, lon=lon, grid_size=25)
+        _persist_dynamic_grid(db, city_id=city_id, rows=rows)
     return {
         "timestamp": utc_now_iso(),
         "city_id": city_id,
@@ -387,6 +474,7 @@ def location_insights(
         nearest = dict(by_distance[0])
         nearest["city_rank"] = rank_map[nearest["ward_id"]]
         top_n = max(1, min(top_n, 25))
+        _persist_dynamic_grid(db, city_id=resolved_city_id, rows=dyn_rows)
         return {
             "timestamp": utc_now_iso(),
             "city_id": _sanitize_city_id(resolved_city_id),
