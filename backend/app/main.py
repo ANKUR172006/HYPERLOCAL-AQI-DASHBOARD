@@ -26,12 +26,12 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     configure_logging()
-    init_db()
 
-    # Never block startup on long pipeline work (Railway healthchecks).
-    def _bootstrap_and_cycle() -> None:
+    # Never block startup on DB init / pipeline work (Railway healthchecks).
+    def _startup_background() -> None:
         db = SessionLocal()
         try:
+            init_db()
             PipelineService(db).bootstrap_city_and_wards()
             run_pipeline_cycle(db)
         except Exception:
@@ -39,8 +39,11 @@ async def lifespan(_: FastAPI):
         finally:
             db.close()
 
-    asyncio.create_task(asyncio.to_thread(_bootstrap_and_cycle))
-    maybe_start_scheduler()
+    asyncio.create_task(asyncio.to_thread(_startup_background))
+    try:
+        maybe_start_scheduler()
+    except Exception:
+        logger.exception("Scheduler failed to start; continuing without scheduler")
     yield
     stop_scheduler()
 
