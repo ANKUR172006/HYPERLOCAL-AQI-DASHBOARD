@@ -18,5 +18,12 @@ backend/*.db
 backend/uvicorn.out.log
 backend/uvicorn.err.log
 
+# Local cache folders created by some tools/runners
+pytest-cache-files-*/
+pytest-cache-files-*
+
+# Local logs
+*.log
+
 .DS_Store
 Thumbs.db

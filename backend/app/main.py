@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.v1 import router as v1_router
 from app.core.config import settings
@@ -41,6 +45,24 @@ def create_app() -> FastAPI:
     )
     app.add_exception_handler(AppError, app_error_handler)
     app.include_router(v1_router, prefix=settings.api_prefix)
+
+    # Serve `frontend_new` (Vite build) when present (Railway / Docker).
+    static_dir = Path(__file__).resolve().parent / "static"
+    index_html = static_dir / "index.html"
+    assets_dir = static_dir / "assets"
+    if index_html.exists():
+        if assets_dir.is_dir():
+            app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+        @app.get("/{full_path:path}")
+        def spa_fallback(full_path: str):  # type: ignore[valid-type]
+            # API routes are served by the router above.
+            if full_path.startswith(settings.api_prefix.strip("/") + "/"):
+                raise HTTPException(status_code=404, detail="Not found")
+            candidate = static_dir / full_path
+            if candidate.is_file():
+                return FileResponse(str(candidate))
+            return FileResponse(str(index_html), media_type="text/html")
     return app
 
 

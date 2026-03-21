@@ -8,6 +8,8 @@ CREATE TABLE IF NOT EXISTS stations (
   state VARCHAR(120) DEFAULT '',
   latitude DOUBLE PRECISION NOT NULL,
   longitude DOUBLE PRECISION NOT NULL,
+  -- Keep WKT TEXT for compatibility with the ORM (SQLite + PostGIS).
+  geom_wkt TEXT DEFAULT '',
   geom GEOGRAPHY(POINT, 4326),
   source VARCHAR(50) DEFAULT 'CPCB',
   created_at_utc TIMESTAMPTZ DEFAULT NOW(),

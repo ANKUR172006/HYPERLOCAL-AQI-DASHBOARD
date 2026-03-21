@@ -10,6 +10,8 @@ from typing import Any
 
 import httpx
 
+from app.core.config import settings
+
 _API_CACHE: dict[str, tuple[datetime, Any]] = {}
 _API_CACHE_TTL_SEC = 120
 
@@ -240,6 +242,8 @@ class CpcbSource:
         return all_records
 
     def _safe_get_json(self, url: str, params: dict[str, str] | None) -> Any:
+        if not getattr(settings, "external_apis_enabled", True):
+            return {}
         cache_key = f"{url}|{json.dumps(params or {}, sort_keys=True)}"
         cached = _API_CACHE.get(cache_key)
         if cached:
@@ -254,6 +258,10 @@ class CpcbSource:
             _API_CACHE[cache_key] = (utc_now(), payload)
             return payload
         except Exception:
+            # If the network call fails, prefer returning a stale cached payload (stale-if-error)
+            # to avoid "data jumps" between refreshes during intermittent API outages.
+            if cached:
+                return cached[1]
             return {}
 
     def _extract_records(self, payload: Any) -> list[dict[str, Any]]:
@@ -307,6 +315,10 @@ class CpcbSource:
             pol_avg = _to_float(_first_of(row, ("pollutant_avg", "avg_value", "avg")), default=-1.0)
             normalized_pol = pol_map.get(pol_id)
             if normalized_pol and pol_avg >= 0:
+                # Data.gov CPCB datasets sometimes report CO on a different scale than mg/m3 (e.g., ug/m3-like).
+                # Heuristic: values >10 are unlikely to be mg/m3 in ambient air; downscale to mg/m3.
+                if normalized_pol == "co" and pol_avg > 10:
+                    pol_avg = pol_avg / 1000.0
                 groups[key][normalized_pol] = pol_avg
 
         out: list[StationObservation] = []

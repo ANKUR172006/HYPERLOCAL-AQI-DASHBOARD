@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -25,6 +25,11 @@ class Ward(Base):
     ward_name: Mapped[str] = mapped_column(String(120), nullable=False)
     population: Mapped[int] = mapped_column(Integer, default=0)
     sensitive_sites_count: Mapped[int] = mapped_column(Integer, default=0)
+    # Real-ward support (Option A): load polygons from GeoJSON and map lat/lon using PostGIS ST_Contains.
+    # Kept as WKT TEXT for compatibility with SQLite; in PostGIS we use ST_GeomFromText on demand.
+    centroid_lat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    centroid_lon: Mapped[float | None] = mapped_column(Float, nullable=True)
+    geom_wkt: Mapped[str] = mapped_column(Text, default="")
 
 
 class AqiSnapshot(Base):
@@ -121,6 +126,42 @@ class PollutionReading(Base):
     raw_json: Mapped[dict] = mapped_column(JSON, default=dict)
     data_quality_score: Mapped[float] = mapped_column(Float, default=0.9)
     source: Mapped[str] = mapped_column(String(50), default="CPCB")
+
+
+class RawMeasurement(Base):
+    __tablename__ = "raw_measurements"
+    measurement_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    station_code: Mapped[str] = mapped_column(String(128), index=True)
+    ts_slot_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    pollutant_id: Mapped[str] = mapped_column(String(32), index=True)
+    value: Mapped[float] = mapped_column(Float, nullable=False)
+    unit: Mapped[str] = mapped_column(String(24), default="")
+    source: Mapped[str] = mapped_column(String(64), default="CPCB")
+    raw_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, default=now_utc)
+
+    __table_args__ = (
+        UniqueConstraint("station_code", "ts_slot_utc", "pollutant_id", name="uq_raw_station_ts_pollutant"),
+    )
+
+
+class CleanMeasurement(Base):
+    __tablename__ = "clean_measurements"
+    measurement_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    station_code: Mapped[str] = mapped_column(String(128), index=True)
+    ts_slot_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    pollutant_id: Mapped[str] = mapped_column(String(32), index=True)
+    raw_value: Mapped[float] = mapped_column(Float, nullable=False)
+    clean_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unit: Mapped[str] = mapped_column(String(24), default="")
+    qa_status: Mapped[str] = mapped_column(String(20), index=True, default="ACCEPTED")
+    qa_flags: Mapped[dict] = mapped_column(JSON, default=dict)
+    source: Mapped[str] = mapped_column(String(64), default="CPCB")
+    created_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, default=now_utc)
+
+    __table_args__ = (
+        UniqueConstraint("station_code", "ts_slot_utc", "pollutant_id", name="uq_clean_station_ts_pollutant"),
+    )
 
 
 class WeatherData(Base):

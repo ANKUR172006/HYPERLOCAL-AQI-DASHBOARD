@@ -1,0 +1,22 @@
+# Python / node / build output
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/node_modules/
+**/dist/
+
+# Local data / logs
+backend/aqi.db
+**/*.log
+.git/
+.gitignore
+.qodo/
+pytest-cache-files-*/
+.pytest_cache/
+
+# OS files
+**/.DS_Store
+**/Thumbs.db
+

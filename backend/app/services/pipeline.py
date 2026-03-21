@@ -3,17 +3,33 @@ from __future__ import annotations
 import logging
 import math
 import os
+import json
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from random import Random
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.entities import AqiSnapshot, City, CrisisEvent, ForecastSnapshot, Ward
+from app.models.entities import (
+    AqiSnapshot,
+    City,
+    CleanMeasurement,
+    CrisisEvent,
+    ForecastSnapshot,
+    PollutionReading,
+    RawMeasurement,
+    Station,
+    Ward,
+)
 from app.services.cpcb_source import CpcbSource, StationObservation
 from app.services.environmental_ingestion_service import EnvironmentalIngestionService
+from app.services.processing.environmental_processing import align_to_hour
 
 logger = logging.getLogger(__name__)
 
@@ -23,18 +39,23 @@ def now_utc() -> datetime:
 
 
 AQI_BREAKPOINTS = {
-    "pm25": [(0, 30, 0, 50), (31, 60, 51, 100), (61, 90, 101, 200), (91, 120, 201, 300), (121, 250, 301, 400), (251, 350, 401, 500)],
-    "pm10": [(0, 50, 0, 50), (51, 100, 51, 100), (101, 250, 101, 200), (251, 350, 201, 300), (351, 430, 301, 400), (431, 500, 401, 500)],
-    "no2": [(0, 40, 0, 50), (41, 80, 51, 100), (81, 180, 101, 200), (181, 280, 201, 300), (281, 400, 301, 400), (401, 1000, 401, 500)],
-    "so2": [(0, 40, 0, 50), (41, 80, 51, 100), (81, 380, 101, 200), (381, 800, 201, 300), (801, 1600, 301, 400), (1601, 2000, 401, 500)],
-    "o3": [(0, 50, 0, 50), (51, 100, 51, 100), (101, 168, 101, 200), (169, 208, 201, 300), (209, 748, 301, 400), (749, 1000, 401, 500)],
-    "co": [(0, 1.0, 0, 50), (1.1, 2.0, 51, 100), (2.1, 10, 101, 200), (10.1, 17, 201, 300), (17.1, 34, 301, 400), (34.1, 50, 401, 500)],
+    # Use continuous float ranges (no gaps) to avoid "fall through -> 500" for non-integer concentrations.
+    # Units: PM/NO2/SO2/O3 in ug/m3, CO in mg/m3.
+    "pm25": [(0, 30, 0, 50), (30, 60, 51, 100), (60, 90, 101, 200), (90, 120, 201, 300), (120, 250, 301, 400), (250, 350, 401, 500)],
+    "pm10": [(0, 50, 0, 50), (50, 100, 51, 100), (100, 250, 101, 200), (250, 350, 201, 300), (350, 430, 301, 400), (430, 500, 401, 500)],
+    "no2": [(0, 40, 0, 50), (40, 80, 51, 100), (80, 180, 101, 200), (180, 280, 201, 300), (280, 400, 301, 400), (400, 1000, 401, 500)],
+    "so2": [(0, 40, 0, 50), (40, 80, 51, 100), (80, 380, 101, 200), (380, 800, 201, 300), (800, 1600, 301, 400), (1600, 2000, 401, 500)],
+    "o3": [(0, 50, 0, 50), (50, 100, 51, 100), (100, 168, 101, 200), (168, 208, 201, 300), (208, 748, 301, 400), (748, 1000, 401, 500)],
+    "co": [(0, 1.0, 0, 50), (1.0, 2.0, 51, 100), (2.0, 10, 101, 200), (10, 17, 201, 300), (17, 34, 301, 400), (34, 50, 401, 500)],
 }
 
 
 def calc_sub_index(concentration: float, pollutant: str) -> int:
-    for bp_lo, bp_hi, i_lo, i_hi in AQI_BREAKPOINTS[pollutant]:
-        if bp_lo <= concentration <= bp_hi:
+    # Breakpoints are monotonic and continuous, so use inclusive upper bound and
+    # inclusive lower bound only for the first segment.
+    for idx, (bp_lo, bp_hi, i_lo, i_hi) in enumerate(AQI_BREAKPOINTS[pollutant]):
+        lo_ok = concentration >= bp_lo if idx == 0 else concentration > bp_lo
+        if lo_ok and concentration <= bp_hi:
             idx = ((i_hi - i_lo) / (bp_hi - bp_lo)) * (concentration - bp_lo) + i_lo
             return max(0, min(500, round(idx)))
     return 500
@@ -65,9 +86,38 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def _build_ward_centroids() -> dict[str, tuple[float, float]]:
-    # 5x5 grid across Delhi-like lat/lon envelope for ward-level interpolation.
+    # 5x5 grid across the Delhi boundary bbox so interpolation spans the full city outline.
     lat_start, lon_start = 28.45, 77.02
     lat_step, lon_step = 0.055, 0.07
+    try:
+        boundary = json.loads(Path(settings.delhi_boundary_geojson_path).read_text(encoding="utf-8"))
+        min_lon = min_lat = float("inf")
+        max_lon = max_lat = float("-inf")
+
+        def walk(coords):
+            nonlocal min_lon, min_lat, max_lon, max_lat
+            if isinstance(coords, (list, tuple)) and coords and isinstance(coords[0], (int, float)):
+                lon, lat = float(coords[0]), float(coords[1])
+                min_lon = min(min_lon, lon)
+                min_lat = min(min_lat, lat)
+                max_lon = max(max_lon, lon)
+                max_lat = max(max_lat, lat)
+                return
+            if isinstance(coords, (list, tuple)):
+                for c in coords:
+                    walk(c)
+
+        for feat in boundary.get("features", []) or []:
+            geom = (feat or {}).get("geometry") or {}
+            walk(geom.get("coordinates"))
+
+        if min_lon != float("inf"):
+            lon_step = (max_lon - min_lon) / 5.0
+            lat_step = (max_lat - min_lat) / 5.0
+            lon_start = min_lon + lon_step / 2.0
+            lat_start = min_lat + lat_step / 2.0
+    except Exception:
+        pass
     coords: dict[str, tuple[float, float]] = {}
     idx = 1
     for r in range(5):
@@ -78,6 +128,29 @@ def _build_ward_centroids() -> dict[str, tuple[float, float]]:
 
 
 WARD_CENTROIDS = _build_ward_centroids()
+
+_POLLUTANT_ALIASES: dict[str, str] = {
+    "PM25": "PM25",
+    "PM2_5": "PM25",
+    "PM2.5": "PM25",
+    "PM_25": "PM25",
+    "PM10": "PM10",
+    "PM_10": "PM10",
+    "NO2": "NO2",
+    "SO2": "SO2",
+    "O3": "O3",
+    "OZONE": "O3",
+    "CO": "CO",
+}
+
+_POLLUTANT_BOUNDS: dict[str, tuple[float, float]] = {
+    "PM25": (0.0, 1000.0),
+    "PM10": (0.0, 2000.0),
+    "NO2": (0.0, 2000.0),
+    "SO2": (0.0, 4000.0),
+    "O3": (0.0, 2000.0),
+    "CO": (0.0, 100.0),  # mg/m3
+}
 
 
 @dataclass
@@ -100,6 +173,69 @@ class PipelineService:
     def __init__(self, db: Session):
         self.db = db
 
+    def _dialect_name(self) -> str:
+        return str(self.db.get_bind().dialect.name)
+
+    def _insert(self, table):
+        if self._dialect_name() == "postgresql":
+            return pg_insert(table)
+        return sqlite_insert(table)
+
+    def _norm_pollutant_id(self, pollutant_id: str) -> str:
+        key = str(pollutant_id or "").strip().upper().replace(" ", "").replace("-", "_")
+        return _POLLUTANT_ALIASES.get(key, key)
+
+    def _qa_clean_one(self, raw: RawMeasurement) -> tuple[str, float | None, dict]:
+        pollutant = self._norm_pollutant_id(raw.pollutant_id)
+        flags: dict[str, object] = {}
+        value = float(raw.value)
+        unit = (raw.unit or "").strip().lower()
+
+        if unit in {"µg/m3", "ug/m3", "ug/m^3", "µg/m^3"} and pollutant == "CO":
+            flags["unit_converted"] = "ugm3_to_mgm3"
+            value = value / 1000.0
+            unit = "mg/m3"
+        elif unit in {"mg/m3", "mg/m^3"} and pollutant in {"PM25", "PM10", "NO2", "SO2", "O3"}:
+            flags["unit_converted"] = "mgm3_to_ugm3"
+            value = value * 1000.0
+            unit = "ug/m3"
+
+        lo, hi = _POLLUTANT_BOUNDS.get(pollutant, (0.0, float("inf")))
+        if value < lo or value > hi:
+            return "REJECTED", None, {"reason": "out_of_bounds", "pollutant": pollutant, "bounds": [lo, hi], "unit": unit}
+
+        return "ACCEPTED", value, {"pollutant": pollutant, "unit": unit, **flags}
+
+    def _bulk_insert_ignore(self, model, values: list[dict]) -> None:
+        if not values:
+            return
+        stmt = self._insert(model.__table__).values(values)
+        if self._dialect_name() == "postgresql":
+            stmt = stmt.on_conflict_do_nothing()
+        else:
+            stmt = stmt.prefix_with("OR IGNORE")
+        self.db.execute(stmt)
+
+    def _bulk_upsert_measurements(self, model, values: list[dict]) -> None:
+        if not values:
+            return
+        stmt = self._insert(model.__table__).values(values)
+        conflict = ["station_code", "ts_slot_utc", "pollutant_id"]
+
+        if model.__tablename__ == "raw_measurements":
+            update_cols = ["value", "unit", "source", "raw_json", "created_at_utc"]
+        elif model.__tablename__ == "clean_measurements":
+            update_cols = ["raw_value", "clean_value", "unit", "qa_status", "qa_flags", "source", "created_at_utc"]
+        else:
+            self._bulk_insert_ignore(model, values)
+            return
+
+        stmt = stmt.on_conflict_do_update(
+            index_elements=conflict,
+            set_={col: getattr(stmt.excluded, col) for col in update_cols},
+        )
+        self.db.execute(stmt)
+
     def bootstrap_city_and_wards(self) -> None:
         city = self.db.get(City, "DELHI")
         if city is None:
@@ -107,6 +243,7 @@ class PipelineService:
             self.db.add(city)
             for idx in range(1, 26):
                 ward_id = f"DEL_WARD_{idx:03d}"
+                centroid = WARD_CENTROIDS.get(ward_id, (28.6139, 77.2090))
                 self.db.add(
                     Ward(
                         ward_id=ward_id,
@@ -114,25 +251,30 @@ class PipelineService:
                         ward_name=f"Ward {idx}",
                         population=50000 + idx * 250,
                         sensitive_sites_count=2 + (idx % 4),
+                        centroid_lat=float(centroid[0]),
+                        centroid_lon=float(centroid[1]),
                     )
                 )
             self.db.commit()
 
     def run_full_pipeline(self) -> None:
+        ts_slot = align_to_hour(now_utc())
         wards = self.db.scalars(select(Ward).order_by(Ward.ward_id)).all()
         if not wards:
             self.bootstrap_city_and_wards()
             wards = self.db.scalars(select(Ward).order_by(Ward.ward_id)).all()
 
-        stations = self._data_ingestion_layer()
-        cleaned = self._cleaning_validation_layer(stations)
-        interpolated = self._spatial_interpolation_idw_layer(cleaned, wards)
-        snapshots = self._aqi_calculation_layer(interpolated)
-        self._ai_forecasting_xgboost_layer(interpolated, snapshots)
-        crisis = self._hybrid_crisis_detection_layer(interpolated, snapshots)
+        stations = self.ingest(ts_slot)
+        self.qa_clean(ts_slot)
+        clean_vectors = self.load_clean_station_vectors(ts_slot)
+        cleaned = self._cleaning_validation_layer(clean_vectors) if clean_vectors else self._cleaning_validation_layer(stations)
+        interpolated = self.interpolate_wards(ts_slot, cleaned, wards)
+        snapshots = self.compute_aqi(ts_slot, interpolated)
+        self.forecast(ts_slot, interpolated, snapshots)
+        crisis = self.detect_crises(ts_slot, interpolated, snapshots)
         self._early_warning_layer(crisis)
         in_pytest = os.getenv("PYTEST_CURRENT_TEST") is not None
-        if settings.enable_extended_ingestion and stations and not in_pytest:
+        if settings.enable_extended_ingestion and settings.external_apis_enabled and stations and not in_pytest:
             nearest = stations[0]
             try:
                 EnvironmentalIngestionService(self.db).ingest_for_coordinates(nearest.latitude, nearest.longitude)
@@ -140,6 +282,334 @@ class PipelineService:
                 # Never break core AQI pipeline when auxiliary external feeds fail.
                 logger.exception("Extended environmental ingestion failed; core pipeline will continue")
         self.db.commit()
+
+    def ingest(self, ts_slot: datetime) -> list[StationObservation]:
+        rows = self._data_ingestion_layer()
+        raw_values: list[dict] = []
+
+        authoritative = any((r.source or "").strip().lower() == "cpcb_api" for r in rows)
+        cached = any((r.source or "").startswith("cpcb_db_cache") for r in rows)
+        for row in rows:
+            code = (row.station_id or row.station_name or "").strip() or "unknown"
+            station = self.db.scalars(select(Station).where(Station.station_code == code)).first()
+            if station is None:
+                station = Station(
+                    station_code=code,
+                    station_name=row.station_name or code,
+                    city="",
+                    state="",
+                    latitude=row.latitude,
+                    longitude=row.longitude,
+                    geom_wkt=f"POINT({row.longitude} {row.latitude})",
+                    source="CPCB",
+                )
+                self.db.add(station)
+            else:
+                station.station_name = row.station_name or station.station_name
+                station.latitude = row.latitude
+                station.longitude = row.longitude
+                station.geom_wkt = f"POINT({row.longitude} {row.latitude})"
+                station.updated_at_utc = now_utc()
+                self.db.add(station)
+
+            source = row.source or "CPCB"
+            raw_values.extend(
+                [
+                    {
+                        "station_code": code,
+                        "ts_slot_utc": ts_slot,
+                        "pollutant_id": "PM25",
+                        "value": float(row.pm25),
+                        "unit": "ug/m3",
+                        "source": source,
+                        "raw_json": {"station_name": row.station_name, "source": source},
+                    },
+                    {
+                        "station_code": code,
+                        "ts_slot_utc": ts_slot,
+                        "pollutant_id": "PM10",
+                        "value": float(row.pm10),
+                        "unit": "ug/m3",
+                        "source": source,
+                        "raw_json": {"station_name": row.station_name, "source": source},
+                    },
+                    {
+                        "station_code": code,
+                        "ts_slot_utc": ts_slot,
+                        "pollutant_id": "NO2",
+                        "value": float(row.no2),
+                        "unit": "ug/m3",
+                        "source": source,
+                        "raw_json": {"station_name": row.station_name, "source": source},
+                    },
+                    {
+                        "station_code": code,
+                        "ts_slot_utc": ts_slot,
+                        "pollutant_id": "SO2",
+                        "value": float(row.so2),
+                        "unit": "ug/m3",
+                        "source": source,
+                        "raw_json": {"station_name": row.station_name, "source": source},
+                    },
+                    {
+                        "station_code": code,
+                        "ts_slot_utc": ts_slot,
+                        "pollutant_id": "O3",
+                        "value": float(row.o3),
+                        "unit": "ug/m3",
+                        "source": source,
+                        "raw_json": {"station_name": row.station_name, "source": source},
+                    },
+                    {
+                        "station_code": code,
+                        "ts_slot_utc": ts_slot,
+                        "pollutant_id": "CO",
+                        "value": float(row.co),
+                        "unit": "mg/m3",
+                        "source": source,
+                        "raw_json": {"station_name": row.station_name, "source": source},
+                    },
+                ]
+            )
+
+        # If we have live API rows, drop fallback rows for this ts_slot so we don't "mix" file/synthetic
+        # with real-time data within the same hour (this was a major source of sudden city-wide jumps).
+        try:
+            station_count = len({(r.station_id or "").strip() for r in rows if (r.station_id or "").strip()})
+        except Exception:
+            station_count = 0
+
+        if authoritative and station_count >= 3:
+            self.db.execute(
+                delete(RawMeasurement).where(
+                    RawMeasurement.ts_slot_utc == ts_slot,
+                    RawMeasurement.source != "cpcb_api",
+                )
+            )
+        elif cached and station_count >= 3:
+            # Cache-based fallback should still be preferred over the bundled sample file/synthetic
+            # within the same hour slot.
+            self.db.execute(
+                delete(RawMeasurement).where(
+                    RawMeasurement.ts_slot_utc == ts_slot,
+                    RawMeasurement.source.in_(["cpcb_file", "cpcb_synthetic_fallback"]),
+                )
+            )
+
+        # Upsert so repeated cycles within the same ts_slot refresh values.
+        self._bulk_upsert_measurements(RawMeasurement, raw_values)
+        return rows
+
+    def qa_clean(self, ts_slot: datetime) -> None:
+        raw_rows = self.db.scalars(select(RawMeasurement).where(RawMeasurement.ts_slot_utc == ts_slot)).all()
+        if not raw_rows:
+            return
+        rejected_reasons: Counter[str] = Counter()
+        clean_values: list[dict] = []
+        for raw in raw_rows:
+            status, cleaned_value, flags = self._qa_clean_one(raw)
+            if status != "ACCEPTED":
+                rejected_reasons[str(flags.get("reason") or "unknown")] += 1
+            clean_values.append(
+                {
+                    "station_code": raw.station_code,
+                    "ts_slot_utc": ts_slot,
+                    "pollutant_id": self._norm_pollutant_id(raw.pollutant_id),
+                    "raw_value": float(raw.value),
+                    "clean_value": float(cleaned_value) if cleaned_value is not None else None,
+                    "unit": str(flags.get("unit") or raw.unit or ""),
+                    "qa_status": status,
+                    "qa_flags": flags,
+                    "source": raw.source,
+                }
+            )
+        # Upsert so QA results can be refreshed when raw values change.
+        self._bulk_upsert_measurements(CleanMeasurement, clean_values)
+        accepted = sum(1 for v in clean_values if v["qa_status"] == "ACCEPTED")
+        logger.info(
+            "QA batch ts_slot=%s raw=%s clean=%s rejected=%s reasons=%s",
+            ts_slot.isoformat(),
+            len(raw_rows),
+            accepted,
+            len(raw_rows) - accepted,
+            dict(rejected_reasons),
+        )
+
+    def load_clean_station_vectors(self, ts_slot: datetime) -> list[StationObservation]:
+        accepted = self.db.scalars(
+            select(CleanMeasurement).where(CleanMeasurement.ts_slot_utc == ts_slot, CleanMeasurement.qa_status == "ACCEPTED")
+        ).all()
+        if not accepted:
+            return []
+
+        by_station: dict[str, dict[str, float]] = defaultdict(dict)
+        for row in accepted:
+            if row.clean_value is None:
+                continue
+            by_station[row.station_code][self._norm_pollutant_id(row.pollutant_id)] = float(row.clean_value)
+
+        station_rows = self.db.scalars(select(Station).where(Station.station_code.in_(list(by_station.keys())))).all()
+        station_meta = {s.station_code: s for s in station_rows}
+
+        out: list[StationObservation] = []
+        for code, pols in by_station.items():
+            if not all(k in pols for k in ("PM25", "PM10", "NO2", "SO2", "O3", "CO")):
+                continue
+            meta = station_meta.get(code)
+            if meta is None:
+                continue
+            out.append(
+                StationObservation(
+                    station_id=code,
+                    station_name=meta.station_name,
+                    latitude=float(meta.latitude),
+                    longitude=float(meta.longitude),
+                    pm25=float(pols["PM25"]),
+                    pm10=float(pols["PM10"]),
+                    no2=float(pols["NO2"]),
+                    so2=float(pols["SO2"]),
+                    o3=float(pols["O3"]),
+                    co=float(pols["CO"]),
+                    wind_speed=2.5,
+                    wind_direction=180.0,
+                    humidity=55.0,
+                    temperature=28.0,
+                    observed_at_utc=ts_slot,
+                    source="qa_clean",
+                )
+            )
+        return out
+
+    def interpolate_wards(self, ts_slot: datetime, stations: list[StationObservation], wards: list[Ward]) -> list[WardObservation]:
+        _ = ts_slot
+        return self._spatial_interpolation_idw_layer(stations, wards)
+
+    def compute_aqi(self, ts_slot: datetime, rows: list[WardObservation]) -> list[AqiSnapshot]:
+        if not rows:
+            return []
+        ward_ids = [r.ward_id for r in rows]
+        existing_rows = self.db.scalars(
+            select(AqiSnapshot).where(AqiSnapshot.ts_utc == ts_slot, AqiSnapshot.ward_id.in_(ward_ids))
+        ).all()
+        existing_by_ward = {s.ward_id: s for s in existing_rows}
+        snapshots: list[AqiSnapshot] = []
+        for row in rows:
+            snapshot = existing_by_ward.get(row.ward_id)
+            pollutant_indices = {
+                "PM2.5": calc_sub_index(row.pm25, "pm25"),
+                "PM10": calc_sub_index(row.pm10, "pm10"),
+                "NO2": calc_sub_index(row.no2, "no2"),
+                "SO2": calc_sub_index(row.so2, "so2"),
+                "O3": calc_sub_index(row.o3, "o3"),
+                "CO": calc_sub_index(row.co, "co"),
+            }
+            primary_pollutant = max(pollutant_indices, key=pollutant_indices.get)
+            aqi_value = pollutant_indices[primary_pollutant]
+            total = sum(pollutant_indices.values()) or 1
+            contribution = {key: round((value / total) * 100, 2) for key, value in pollutant_indices.items()}
+            contribution["raw"] = {
+                "pm25": round(row.pm25, 2),
+                "pm10": round(row.pm10, 2),
+                "no2": round(row.no2, 2),
+                "so2": round(row.so2, 2),
+                "o3": round(row.o3, 2),
+                "co": round(row.co, 2),
+                "wind_speed": round(row.wind_speed, 3),
+                "wind_direction": round(row.wind_direction, 3),
+                "humidity": round(row.humidity, 3),
+                "temperature": round(row.temperature, 3),
+                "source": row.source,
+                "ts_slot_utc": ts_slot.isoformat(),
+            }
+            quality_score = 0.93 if row.source.startswith("cpcb") or row.source.startswith("qa_") else 0.72
+            if snapshot is None:
+                snapshot = AqiSnapshot(ts_utc=ts_slot, ward_id=row.ward_id)
+                self.db.add(snapshot)
+            snapshot.aqi_value = aqi_value
+            snapshot.aqi_category = aqi_category(aqi_value)
+            snapshot.primary_pollutant = primary_pollutant
+            snapshot.pmi_value = round(aqi_value * 0.95, 2)
+            snapshot.contribution_json = contribution
+            snapshot.data_quality_score = quality_score
+            snapshot.data_quality_flag = "OK" if quality_score >= 0.9 else "DEGRADED"
+            snapshots.append(snapshot)
+        return snapshots
+
+    def forecast(self, ts_slot: datetime, rows: list[WardObservation], snapshots: list[AqiSnapshot]) -> None:
+        if not rows or not snapshots:
+            return
+        mode = (settings.forecast_model or "auto").strip().lower()
+
+        predictions: dict[str, dict[int, int]] | None = None
+        model_name = "naive"
+        model_version = "naive-v1"
+
+        if mode in {"xgb", "xgboost"} or (mode == "auto" and settings.enable_xgboost_forecasting):
+            model_name = "xgboost"
+            model_version = "xgb-h-v3"
+            predictions = self._xgboost_predict(rows, snapshots)
+
+        if predictions is None and mode in {"seasonal_naive"}:
+            model_name = "seasonal-naive"
+            model_version = "snaive-v1"
+            predictions = {}
+            for s in snapshots:
+                base = self.db.scalars(
+                    select(AqiSnapshot).where(AqiSnapshot.ward_id == s.ward_id, AqiSnapshot.ts_utc == ts_slot - timedelta(hours=24))
+                ).first()
+                val = int(base.aqi_value) if base else int(s.aqi_value)
+                predictions[s.ward_id] = {1: val, 2: val, 3: val}
+
+        if predictions is None and mode in {"momentum"}:
+            model_name = "momentum-fallback"
+            model_version = "fallback-v1"
+            predictions = self._momentum_fallback(rows)
+
+        if predictions is None:
+            predictions = {s.ward_id: {1: int(s.aqi_value), 2: int(s.aqi_value), 3: int(s.aqi_value)} for s in snapshots}
+
+        ward_ids = list(predictions.keys())
+        existing = self.db.scalars(
+            select(ForecastSnapshot).where(ForecastSnapshot.ts_generated_utc == ts_slot, ForecastSnapshot.ward_id.in_(ward_ids))
+        ).all()
+        by_key = {(f.ward_id, int(f.horizon_hour)): f for f in existing}
+
+        for ward_id, horizon_map in predictions.items():
+            for horizon, aqi_pred in horizon_map.items():
+                key = (ward_id, int(horizon))
+                f = by_key.get(key)
+                if f is None:
+                    f = ForecastSnapshot(ts_generated_utc=ts_slot, ward_id=ward_id, horizon_hour=int(horizon))
+                    self.db.add(f)
+                    by_key[key] = f
+                aqi_pred = max(0, min(500, int(round(float(aqi_pred)))))
+                f.target_ts_utc = ts_slot + timedelta(hours=int(horizon))
+                f.aqi_pred = int(aqi_pred)
+                f.aqi_category_pred = aqi_category(int(aqi_pred))
+                f.model_name = model_name
+                f.model_version = model_version
+                f.data_quality_score = 0.94 if model_name == "xgboost" else 0.78
+                f.disaster_mode = int(aqi_pred) > 300
+
+    def detect_crises(self, ts_slot: datetime, rows: list[WardObservation], snapshots: list[AqiSnapshot]) -> list[CrisisEvent]:
+        events = self._hybrid_crisis_detection_layer(rows, snapshots)
+        if not events:
+            return []
+        ward_ids = [e.ward_id for e in events]
+        existing_rows = self.db.execute(
+            select(CrisisEvent.ward_id, CrisisEvent.level).where(
+                CrisisEvent.started_at_utc == ts_slot, CrisisEvent.ward_id.in_(ward_ids)
+            )
+        ).all()
+        existing = {(str(wid), str(level)) for wid, level in existing_rows}
+        out: list[CrisisEvent] = []
+        for e in events:
+            if (e.ward_id, e.level) in existing:
+                continue
+            e.started_at_utc = ts_slot
+            self.db.add(e)
+            out.append(e)
+        return out
 
     def _data_ingestion_layer(self) -> list[StationObservation]:
         source = CpcbSource(
@@ -158,7 +628,138 @@ class PipelineService:
         rows = source.load()
         if rows:
             return rows
+
+        # If live CPCB fetch fails (timeouts / intermittent outages), avoid generating unstable random data.
+        # Prefer a "stale but real" fallback from the DB, then the bundled sample file, and only then synthetic.
+        db_cached = self._load_recent_station_cache(max_age_hours=6, max_stations=30)
+        if db_cached:
+            return db_cached
+
+        if (settings.cpcb_source_mode or "").strip().lower() in {"api", "hybrid"} and settings.cpcb_file_path:
+            file_source = CpcbSource(
+                mode="file",
+                file_path=settings.cpcb_file_path,
+                api_url="",
+                api_key=None,
+            )
+            file_rows = file_source.load()
+            if file_rows:
+                return file_rows
+
         return self._synthetic_cpcb_fallback()
+
+    def _load_recent_station_cache(self, max_age_hours: int = 6, max_stations: int = 30) -> list[StationObservation]:
+        """
+        "Stale but real" fallback when live CPCB fetch fails.
+
+        We intentionally cache from `clean_measurements` (not `pollution_readings`) because the
+        pipeline always populates QA-cleaned station pollutant rows, and older prototypes didn't
+        persist `pollution_readings` consistently. This prevents sudden jumps to the bundled
+        sample CSV (or synthetic data) during intermittent API outages or when the backend restarts.
+        """
+
+        cutoff = now_utc() - timedelta(hours=int(max_age_hours))
+        required = {"PM25", "PM10", "NO2", "SO2", "O3", "CO"}
+
+        def _collect(measure_rows) -> dict[str, dict[str, object]]:
+            by_station: dict[str, dict[str, object]] = {}
+            for station_code, ts_slot, pollutant_id, clean_value, raw_value, src, station_name, lat, lon in measure_rows:
+                code = str(station_code or "").strip()
+                if not code:
+                    continue
+                pol = self._norm_pollutant_id(str(pollutant_id or ""))
+                if pol not in required:
+                    continue
+                value = clean_value if clean_value is not None else raw_value
+                if value is None:
+                    continue
+
+                entry = by_station.setdefault(
+                    code,
+                    {
+                        "station_name": str(station_name or code),
+                        "lat": float(lat),
+                        "lon": float(lon),
+                        "ts": ts_slot,
+                        "src": str(src or ""),
+                        "pols": {},
+                    },
+                )
+
+                # First-seen rows are newest due to ORDER BY desc.
+                pols: dict[str, float] = entry["pols"]  # type: ignore[assignment]
+                if pol in pols:
+                    continue
+                try:
+                    pols[pol] = float(value)
+                except Exception:
+                    continue
+
+                if len(pols) == len(required) and len(by_station) >= max_stations:
+                    break
+            return by_station
+
+        base_stmt = (
+            select(
+                CleanMeasurement.station_code,
+                CleanMeasurement.ts_slot_utc,
+                CleanMeasurement.pollutant_id,
+                CleanMeasurement.clean_value,
+                CleanMeasurement.raw_value,
+                CleanMeasurement.source,
+                Station.station_name,
+                Station.latitude,
+                Station.longitude,
+            )
+            .join(Station, Station.station_code == CleanMeasurement.station_code)
+            .where(CleanMeasurement.ts_slot_utc >= cutoff, CleanMeasurement.qa_status == "ACCEPTED")
+            .order_by(CleanMeasurement.ts_slot_utc.desc())
+            .limit(max_stations * 80)
+        )
+
+        # Prefer cached values that originated from live CPCB API to avoid jumps to the bundled sample file
+        # after transient outages. If we don't have enough "api-ish" stations, fall back to any accepted rows.
+        prefer_api = self.db.execute(base_stmt.where(CleanMeasurement.source.like("%api%"))).all()
+        by_station = _collect(prefer_api)
+        if len(by_station) < max(3, min(max_stations, 8)):
+            all_rows = self.db.execute(base_stmt).all()
+            by_station = _collect(all_rows)
+
+        out: list[StationObservation] = []
+        for code, entry in by_station.items():
+            pols = entry.get("pols") or {}
+            if not all(k in pols for k in required):
+                continue
+            ts = entry.get("ts") or now_utc()
+            if isinstance(ts, datetime) and ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            source_suffix = str(entry.get("src") or "").strip() or "unknown"
+            while source_suffix.startswith("cpcb_db_cache:"):
+                source_suffix = source_suffix[len("cpcb_db_cache:") :]
+            out.append(
+                StationObservation(
+                    station_id=code,
+                    station_name=str(entry.get("station_name") or code),
+                    latitude=float(entry.get("lat") or 0.0),
+                    longitude=float(entry.get("lon") or 0.0),
+                    pm25=float(pols["PM25"]),
+                    pm10=float(pols["PM10"]),
+                    no2=float(pols["NO2"]),
+                    so2=float(pols["SO2"]),
+                    o3=float(pols["O3"]),
+                    co=float(pols["CO"]),
+                    wind_speed=2.5,
+                    wind_direction=180.0,
+                    humidity=55.0,
+                    temperature=28.0,
+                    observed_at_utc=ts if isinstance(ts, datetime) else now_utc(),
+                    source=f"cpcb_db_cache:{source_suffix}",
+                )
+            )
+
+        # Prefer the most recent stations first (already in insertion order by newest rows),
+        # but keep the list bounded.
+        return out[:max_stations]
 
     def _cleaning_validation_layer(self, rows: list[StationObservation]) -> list[StationObservation]:
         cleaned: list[StationObservation] = []
@@ -180,32 +781,112 @@ class PipelineService:
         if not rows:
             return []
 
-        def weighted_mean(target_lat: float, target_lon: float, attr: str) -> float:
-            weighted_sum = 0.0
-            total_weight = 0.0
+        idw_power = float(settings.idw_power or 2.0)
+        nearest_n = int(settings.idw_nearest_n or 0)
+        radius_km = float(settings.idw_radius_km or 0.0)
+
+        def _select_stations(target_lat: float, target_lon: float) -> list[tuple[float, StationObservation]]:
+            items: list[tuple[float, StationObservation]] = []
             for station in rows:
                 dist = _haversine_km(target_lat, target_lon, station.latitude, station.longitude)
-                w = 1.0 / ((dist**2) + 0.0001)
+                if radius_km > 0 and dist > radius_km:
+                    continue
+                items.append((dist, station))
+            items.sort(key=lambda x: x[0])
+            if nearest_n and nearest_n > 0:
+                items = items[:nearest_n]
+            return items
+
+        def _idw_value(target_lat: float, target_lon: float, attr: str, p: float) -> float:
+            items = _select_stations(target_lat, target_lon)
+            if not items:
+                return 0.0
+            if items[0][0] <= 1e-6:
+                return float(getattr(items[0][1], attr))
+            weighted_sum = 0.0
+            total_weight = 0.0
+            eps = 0.0001
+            for dist, station in items:
+                w = 1.0 / ((dist**p) + eps)
                 weighted_sum += w * float(getattr(station, attr))
                 total_weight += w
             return weighted_sum / total_weight if total_weight else 0.0
 
+        if (settings.spatial_method or "idw").strip().lower() == "idw_cv" and len(rows) >= 5:
+            candidate_p = [1.0, 1.5, 2.0, 2.5, 3.0]
+            candidate_n = [n for n in (3, 5, 7) if n < len(rows)]
+
+            best_p = idw_power
+            best_n = nearest_n if nearest_n else min(5, len(rows) - 1)
+            best_rmse = float("inf")
+            for p in candidate_p:
+                for n in candidate_n:
+                    prev_n = nearest_n
+                    try:
+                        # Temporarily override for scoring.
+                        nearest_n = n
+                        se = 0.0
+                        for i, target in enumerate(rows):
+                            others = rows[:i] + rows[i + 1 :]
+                            # Use a local selection with others only.
+                            items = []
+                            for s in others:
+                                dist = _haversine_km(target.latitude, target.longitude, s.latitude, s.longitude)
+                                if radius_km > 0 and dist > radius_km:
+                                    continue
+                                items.append((dist, s))
+                            items.sort(key=lambda x: x[0])
+                            items = items[:n]
+                            if not items:
+                                pred = 0.0
+                            elif items[0][0] <= 1e-6:
+                                pred = float(getattr(items[0][1], "pm25"))
+                            else:
+                                wsum = 0.0
+                                wtot = 0.0
+                                eps = 0.0001
+                                for dist, s in items:
+                                    w = 1.0 / ((dist**p) + eps)
+                                    wsum += w * float(getattr(s, "pm25"))
+                                    wtot += w
+                                pred = wsum / wtot if wtot else 0.0
+                            se += (pred - float(target.pm25)) ** 2
+                        rmse = math.sqrt(se / max(1, len(rows)))
+                        if rmse < best_rmse:
+                            best_rmse = rmse
+                            best_p = p
+                            best_n = n
+                    finally:
+                        nearest_n = prev_n
+
+            idw_power = best_p
+            nearest_n = best_n
+            logger.info("IDW CV selected power=%s nearest_n=%s rmse_pm25=%s", idw_power, nearest_n, round(best_rmse, 3))
+
         observations: list[WardObservation] = []
         for ward in wards:
-            lat, lon = WARD_CENTROIDS.get(ward.ward_id, (28.6139, 77.2090))
+            if ward.centroid_lat is not None and ward.centroid_lon is not None:
+                lat, lon = (float(ward.centroid_lat), float(ward.centroid_lon))
+            else:
+                # Only use the demo Delhi grid for the seeded DEL_WARD_* wards.
+                # For other cities, missing centroids should be resolved by GeoJSON import or dynamic grid persistence.
+                if str(ward.ward_id).startswith("DEL_WARD_"):
+                    lat, lon = WARD_CENTROIDS.get(ward.ward_id, (28.6139, 77.2090))
+                else:
+                    continue
             observations.append(
                 WardObservation(
                     ward_id=ward.ward_id,
-                    pm25=weighted_mean(lat, lon, "pm25"),
-                    pm10=weighted_mean(lat, lon, "pm10"),
-                    no2=weighted_mean(lat, lon, "no2"),
-                    so2=weighted_mean(lat, lon, "so2"),
-                    o3=weighted_mean(lat, lon, "o3"),
-                    co=weighted_mean(lat, lon, "co"),
-                    wind_speed=weighted_mean(lat, lon, "wind_speed"),
-                    wind_direction=weighted_mean(lat, lon, "wind_direction"),
-                    humidity=weighted_mean(lat, lon, "humidity"),
-                    temperature=weighted_mean(lat, lon, "temperature"),
+                    pm25=_idw_value(lat, lon, "pm25", idw_power),
+                    pm10=_idw_value(lat, lon, "pm10", idw_power),
+                    no2=_idw_value(lat, lon, "no2", idw_power),
+                    so2=_idw_value(lat, lon, "so2", idw_power),
+                    o3=_idw_value(lat, lon, "o3", idw_power),
+                    co=_idw_value(lat, lon, "co", idw_power),
+                    wind_speed=_idw_value(lat, lon, "wind_speed", idw_power),
+                    wind_direction=_idw_value(lat, lon, "wind_direction", idw_power),
+                    humidity=_idw_value(lat, lon, "humidity", idw_power),
+                    temperature=_idw_value(lat, lon, "temperature", idw_power),
                     source=rows[0].source,
                 )
             )
@@ -317,7 +998,6 @@ class PipelineService:
                     disaster_mode=current.aqi_value > 300,
                 )
                 events.append(event)
-                self.db.add(event)
         return events
 
     def _early_warning_layer(self, events: list[CrisisEvent]) -> None:
@@ -364,6 +1044,10 @@ class PipelineService:
                         float(raw.get("so2", 0.0)),
                         float(raw.get("o3", 0.0)),
                         float(raw.get("co", 0.0)),
+                        float(raw.get("wind_speed", 2.5) or 2.5),
+                        float(raw.get("wind_direction", 180.0) or 180.0),
+                        float(raw.get("humidity", 55.0) or 55.0),
+                        float(raw.get("temperature", 28.0) or 28.0),
                         math.sin((hour / 24.0) * 2 * math.pi),
                         math.cos((hour / 24.0) * 2 * math.pi),
                         math.sin((dow / 7.0) * 2 * math.pi),
@@ -396,6 +1080,10 @@ class PipelineService:
                         row.so2,
                         row.o3,
                         row.co,
+                        row.wind_speed,
+                        row.wind_direction,
+                        row.humidity,
+                        row.temperature,
                         0.0,
                         1.0,
                         0.0,
@@ -452,6 +1140,10 @@ class PipelineService:
                 row.so2,
                 row.o3,
                 row.co,
+                row.wind_speed,
+                row.wind_direction,
+                row.humidity,
+                row.temperature,
                 math.sin((hour / 24.0) * 2 * math.pi),
                 math.cos((hour / 24.0) * 2 * math.pi),
                 math.sin((dow / 7.0) * 2 * math.pi),
@@ -480,7 +1172,8 @@ class PipelineService:
         return output
 
     def _synthetic_cpcb_fallback(self) -> list[StationObservation]:
-        seed = int(now_utc().strftime("%Y%m%d%H%M"))
+        # Keep synthetic fallback stable within the same hour (avoid wild changes on refresh).
+        seed = int(now_utc().strftime("%Y%m%d%H"))
         rng = Random(seed)
         rows: list[StationObservation] = []
         for idx in range(1, 9):

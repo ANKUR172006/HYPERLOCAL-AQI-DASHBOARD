@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import time
 
 import httpx
 
@@ -56,6 +57,11 @@ class SatelliteCollector:
             return self._degraded(lat, lon, date_utc, "nasa_call_in_cooldown_after_failure")
 
         # Attempt live NASA refresh only when needed.
+        if not settings.external_apis_enabled:
+            _record_check(settings.nasa_earth_base_url, {"lat": lat, "lon": lon, "date": date_utc}, success=False, status_code=None, error="external_apis_disabled")
+            if cached and cache_age is not None and cache_age <= _SAT_STALE_TTL:
+                return cached
+            return self._degraded(lat, lon, date_utc, "external_apis_disabled")
         snap = self._fetch_from_nasa(lat, lon, date_utc)
         if snap:
             _SAT_CACHE[key] = (now, snap)
@@ -74,13 +80,32 @@ class SatelliteCollector:
             "date": date_utc,
             "api_key": settings.nasa_api_key,
             "dim": 0.1,
+            # When using the imagery endpoint, this makes the API return JSON with `cloud_score` + `url`.
+            # This gives us a stable "satellite signal" for the UI even when aerosol products aren't available.
+            "cloud_score": "true",
         }
         retries = max(1, int(settings.nasa_max_retries))
         for _ in range(retries):
             try:
-                response = httpx.get(settings.nasa_earth_base_url, params=params, timeout=settings.nasa_timeout_sec)
+                timeout = httpx.Timeout(
+                    connect=5.0,
+                    read=float(settings.nasa_timeout_sec),
+                    write=5.0,
+                    pool=5.0,
+                )
+                response = httpx.get(settings.nasa_earth_base_url, params=params, timeout=timeout)
                 response.raise_for_status()
-                payload = response.json()
+                try:
+                    payload = response.json()
+                except Exception:
+                    _record_check(
+                        settings.nasa_earth_base_url,
+                        params,
+                        success=False,
+                        status_code=response.status_code,
+                        error=f"Non-JSON response (content-type={response.headers.get('content-type')})",
+                    )
+                    return None
                 _record_check(settings.nasa_earth_base_url, params, success=True, status_code=response.status_code, error=None)
 
                 ts_txt = str(payload.get("date") or date_utc)
@@ -91,6 +116,7 @@ class SatelliteCollector:
                 except ValueError:
                     ts = _utcnow()
 
+                # The NASA Earth imagery API doesn't provide aerosol index; for demo UX, use cloud_score as a proxy signal.
                 aerosol = payload.get("aerosol_index")
                 if aerosol is None:
                     aerosol = payload.get("cloud_score")
@@ -114,6 +140,8 @@ class SatelliteCollector:
                 if isinstance(exc, httpx.HTTPStatusError):
                     status_code = exc.response.status_code
                 _record_check(settings.nasa_earth_base_url, params, success=False, status_code=status_code, error=str(exc))
+                # Small backoff for transient timeouts.
+                time.sleep(0.4)
         return None
 
     def _degraded(self, lat: float, lon: float, date_utc: str, note: str) -> SatelliteSnapshot:

@@ -49,6 +49,9 @@ def get_recent_api_checks(limit: int = 100) -> list[dict[str, Any]]:
 
 
 def get_json_with_retry(url: str, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> Any:
+    if not settings.external_apis_enabled:
+        _record_check(url, params, success=False, status_code=None, error="external_apis_disabled")
+        return {}
     retries = max(1, settings.external_http_max_retries)
     backoff = 0.6
     last_error: Exception | None = None

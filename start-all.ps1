@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $backend = Join-Path $root "backend"
-$frontend = Join-Path $root "frontend"
+$frontend = Join-Path $root "frontend_new"
 
 if (-not (Test-Path $backend)) {
   throw "Backend folder not found: $backend"
@@ -13,6 +13,10 @@ if (-not (Test-Path $frontend)) {
 
 $backendCmd = "cd `"$backend`"; .\\run_backend_local.ps1"
 $frontendCmd = "cd `"$frontend`"; if (!(Test-Path node_modules)) { npm install }; npm run dev -- --host 127.0.0.1 --port 5173"
+
+if (-not $env:VITE_API_TARGET) {
+  $env:VITE_API_TARGET = "http://127.0.0.1:8000"
+}
 
 Start-Process powershell -ArgumentList "-NoExit", "-Command", $backendCmd
 Start-Sleep -Seconds 2
