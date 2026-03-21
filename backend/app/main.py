@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import asyncio
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -18,17 +20,26 @@ from app.jobs.pipeline_jobs import run_pipeline_cycle
 from app.jobs.scheduler import maybe_start_scheduler, stop_scheduler
 from app.services.pipeline import PipelineService
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     configure_logging()
     init_db()
-    db = SessionLocal()
-    try:
-        PipelineService(db).bootstrap_city_and_wards()
-        run_pipeline_cycle(db)
-    finally:
-        db.close()
+
+    # Never block startup on long pipeline work (Railway healthchecks).
+    def _bootstrap_and_cycle() -> None:
+        db = SessionLocal()
+        try:
+            PipelineService(db).bootstrap_city_and_wards()
+            run_pipeline_cycle(db)
+        except Exception:
+            logger.exception("Startup pipeline cycle failed; API will still serve requests")
+        finally:
+            db.close()
+
+    asyncio.create_task(asyncio.to_thread(_bootstrap_and_cycle))
     maybe_start_scheduler()
     yield
     stop_scheduler()
