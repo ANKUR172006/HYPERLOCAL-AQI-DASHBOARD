@@ -2,6 +2,7 @@ import Icon from "../ui/Icon.jsx";
 
 const NAV = [
   { id: "home", label: "Home", icon: "home" },
+  { id: "insights", label: "Insights", icon: "info" },
   { id: "explore", label: "Explore", icon: "explore" },
   { id: "alerts", label: "Alerts", icon: "bell" },
   { id: "trends", label: "Trends", icon: "trends" },

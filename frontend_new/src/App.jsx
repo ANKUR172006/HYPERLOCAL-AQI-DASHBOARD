@@ -6,6 +6,7 @@ import './index.css';
 
 // Lazy-loaded pages for code splitting
 const HomePage    = lazy(() => import('./pages/citizen/HomePage.jsx'));
+const InsightsPage = lazy(() => import('./pages/citizen/InsightsPage.jsx'));
 const ExplorePage = lazy(() => import('./pages/citizen/ExplorePage.jsx'));
 const AlertsPage  = lazy(() => import('./pages/citizen/AlertsPage.jsx'));
 const TrendsPage  = lazy(() => import('./pages/citizen/TrendsPage.jsx'));
@@ -49,6 +50,7 @@ export default function App() {
     >
       <Suspense fallback={<PageSkeleton />}>
         {page === 'home'    && <HomePage    onNavigate={setPage} />}
+        {page === 'insights' && <InsightsPage onNavigate={setPage} />}
         {page === 'explore' && <ExplorePage />}
         {page === 'alerts'  && <AlertsPage />}
         {page === 'trends'  && <TrendsPage />}
