@@ -45,12 +45,19 @@ python -m pytest -q
 ## Run Frontend
 
 ```powershell
-cd frontend
+cd frontend_new
 npm install
 npm run dev
 ```
 
 Frontend URL: `http://127.0.0.1:5173`
+
+## Deploy on Railway (single service)
+
+This repo ships a root `Dockerfile` that builds `frontend_new` and serves it via the FastAPI backend.
+
+- **Recommended:** don’t set any Railway “Start Command” (let Docker run the image default).
+- If Railway requires a start command, set it to: `python -m app.entrypoint`
 
 ## Start Both (Windows PowerShell)
 
