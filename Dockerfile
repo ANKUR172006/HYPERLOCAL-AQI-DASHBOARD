@@ -30,4 +30,4 @@ COPY --from=frontend-build /work/frontend_new/dist/ /app/backend/app/static/
 
 WORKDIR /app/backend
 
-CMD ["sh", "-c", "python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --log-level info"]
+ENTRYPOINT ["python", "-m", "app.entrypoint"]
