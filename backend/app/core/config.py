@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from pydantic import AliasChoices, Field
@@ -10,7 +11,11 @@ def _backend_dir() -> Path:
 
 
 def _default_sqlite_db_url() -> str:
-    db_path = (_backend_dir() / "aqi.db").resolve()
+    # On Railway/Docker, writing into the image layer path can be restricted; prefer `/tmp`.
+    if os.getenv("RUNNING_IN_DOCKER") == "1":
+        db_path = Path("/tmp/aqi.db")
+    else:
+        db_path = (_backend_dir() / "aqi.db").resolve()
     # SQLAlchemy expects forward slashes in SQLite file URLs on Windows.
     return f"sqlite:///{db_path.as_posix()}"
 

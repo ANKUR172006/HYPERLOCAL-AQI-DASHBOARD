@@ -9,7 +9,8 @@ RUN npm run build
 
 FROM python:3.11-slim AS backend
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    RUNNING_IN_DOCKER=1
 
 WORKDIR /app
 
@@ -26,5 +27,4 @@ COPY --from=frontend-build /work/frontend_new/dist/ /app/backend/app/static/
 
 WORKDIR /app/backend
 
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
-
+CMD ["sh", "-c", "python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --log-level info"]
