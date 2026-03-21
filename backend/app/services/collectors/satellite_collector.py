@@ -62,6 +62,11 @@ class SatelliteCollector:
             if cached and cache_age is not None and cache_age <= _SAT_STALE_TTL:
                 return cached
             return self._degraded(lat, lon, date_utc, "external_apis_disabled")
+        if not settings.nasa_api_key:
+            _record_check(settings.nasa_earth_base_url, {"lat": lat, "lon": lon, "date": date_utc}, success=False, status_code=None, error="nasa_api_key_missing")
+            if cached and cache_age is not None and cache_age <= _SAT_STALE_TTL:
+                return cached
+            return self._degraded(lat, lon, date_utc, "nasa_api_key_missing")
         snap = self._fetch_from_nasa(lat, lon, date_utc)
         if snap:
             _SAT_CACHE[key] = (now, snap)

@@ -24,6 +24,8 @@ pytest-cache-files-*
 
 # Local logs
 *.log
+*.pptx
+*.ppt
 
 .DS_Store
 Thumbs.db

@@ -46,7 +46,8 @@ class Settings(BaseSettings):
     cpcb_source_mode: str = Field(default="file", validation_alias=AliasChoices("CPCB_SOURCE_MODE", "DATA_SOURCE_MODE"))
     cpcb_file_path: str = Field(default_factory=_default_cpcb_file_path)
     cpcb_api_url: str = "/resource/3b01bcb8-0b14-4abf-b6f2-c1bfd384ba69"
-    cpcb_api_key: str | None = "579b464db66ec23bdd00000198e9d1e526964f3a6cb6537f1dd9756d"
+    # Optional. If unset, live CPCB pulls may fail; the app will still work in `file` mode.
+    cpcb_api_key: str | None = Field(default=None, validation_alias=AliasChoices("CPCB_API_KEY"))
     cpcb_api_format: str = "json"
     cpcb_api_offset: int = 0
     cpcb_api_limit: int = 10
@@ -58,7 +59,8 @@ class Settings(BaseSettings):
     # Prefer the imagery endpoint (supports `cloud_score=true` JSON responses) for demo-friendly "satellite signal".
     nasa_earth_base_url: str = "https://api.nasa.gov/planetary/earth/imagery"
     nominatim_base_url: str = "https://nominatim.openstreetmap.org/reverse"
-    nasa_api_key: str = "AEkpxqbBv09sgAGmHn38BqeTWM8BYpHaCnvn6DJI"
+    # Optional. If unset, satellite data will be disabled (graceful fallback).
+    nasa_api_key: str | None = Field(default=None, validation_alias=AliasChoices("NASA_API_KEY"))
     # NASA can be slow intermittently; keep a slightly higher default timeout + retry.
     nasa_timeout_sec: float = 12.0
     nasa_max_retries: int = 2
