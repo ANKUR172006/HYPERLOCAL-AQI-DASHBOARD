@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: aqi-backend
+    env: python
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: cd backend && python -m app.entrypoint
+    healthCheckPath: /v1/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      # Keep external integrations on (CPCB/Open-Meteo/Nominatim/FIRMS) unless you want offline demos.
+      - key: EXTERNAL_APIS_ENABLED
+        value: "true"
+      # Recommended for Render: avoid duplicate background schedulers if multiple instances run.
+      - key: ENABLE_SCHEDULER
+        value: "false"
+      # Secrets (set these in Render dashboard when prompted)
+      - key: FIRMS_MAP_KEY
+        sync: false
+      - key: CPCB_API_KEY
+        sync: false
