@@ -72,3 +72,29 @@ def get_json_with_retry(url: str, params: dict[str, Any] | None = None, headers:
     if last_error:
         raise last_error
     return {}
+
+
+def get_text_with_retry(url: str, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> str:
+    if not settings.external_apis_enabled:
+        _record_check(url, params, success=False, status_code=None, error="external_apis_disabled")
+        return ""
+    retries = max(1, settings.external_http_max_retries)
+    backoff = 0.6
+    last_error: Exception | None = None
+    for attempt in range(retries):
+        try:
+            res = httpx.get(url, params=params, headers=headers, timeout=settings.external_http_timeout_sec)
+            res.raise_for_status()
+            _record_check(url, params, success=True, status_code=res.status_code, error=None)
+            return res.text or ""
+        except Exception as exc:  # pragma: no cover - network conditions vary
+            last_error = exc
+            status_code = None
+            if isinstance(exc, httpx.HTTPStatusError):
+                status_code = exc.response.status_code
+            _record_check(url, params, success=False, status_code=status_code, error=str(exc))
+            if attempt < retries - 1:
+                time.sleep(backoff * (2**attempt))
+    if last_error:
+        raise last_error
+    return ""

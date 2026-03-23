@@ -5,6 +5,7 @@ import json
 import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,9 @@ from app.core.config import settings
 
 _API_CACHE: dict[str, tuple[datetime, Any]] = {}
 _API_CACHE_TTL_SEC = 120
+_WARNED_MISSING_DATA_GOV_KEY = False
+
+logger = logging.getLogger(__name__)
 
 
 def utc_now() -> datetime:
@@ -158,6 +162,16 @@ class CpcbSource:
             return self._load_from_file()
         return []
 
+    def _warn_missing_data_gov_key_once(self) -> None:
+        global _WARNED_MISSING_DATA_GOV_KEY
+        if _WARNED_MISSING_DATA_GOV_KEY:
+            return
+        _WARNED_MISSING_DATA_GOV_KEY = True
+        logger.warning(
+            "CPCB_API_KEY is not set; api.data.gov.in requests will return 400. "
+            "Set CPCB_API_KEY (env/.env) or use CPCB_SOURCE_MODE=file (or hybrid)."
+        )
+
     def _load_from_file(self) -> list[StationObservation]:
         path = Path(self.file_path)
         if not path.is_absolute():
@@ -183,6 +197,9 @@ class CpcbSource:
         if url.startswith("/resource/"):
             url = f"https://api.data.gov.in{url}"
         if "api.data.gov.in/resource/" in url:
+            if not (self.api_key and str(self.api_key).strip()):
+                self._warn_missing_data_gov_key_once()
+                return []
             parsed = urllib.parse.urlsplit(url)
             existing = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
             params.update(existing)

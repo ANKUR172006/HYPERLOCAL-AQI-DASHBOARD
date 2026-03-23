@@ -92,6 +92,36 @@ p, h1, h2, h3, h4 { overflow-wrap: break-word; }
   --card-gap:      16px;
 }
 
+/* Explore map: compact ward labels */
+.leaflet-tooltip.ward-label {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  color: var(--text-primary);
+  padding: 0;
+}
+.leaflet-tooltip.ward-label > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(10, 12, 18, 0.72);
+  backdrop-filter: blur(6px);
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+/* Explore: ward glow for high AQI polygons */
+.aqi-ward-glow {
+  filter: drop-shadow(0 0 10px rgba(255, 59, 48, 0.35)) drop-shadow(0 0 18px rgba(255, 59, 48, 0.18));
+}
+.aqi-ward-glow-soft {
+  filter: drop-shadow(0 0 8px rgba(255, 159, 10, 0.22));
+}
+
 /* ===== DARK THEME ===== */
 [data-theme="dark"] {
   --aqi-good:              #2ECC8E;

@@ -72,6 +72,24 @@ export const api = {
     });
     return getJson(`/environment/unified?${qs.toString()}`);
   },
+  getStationsLive(lat, lon, radiusKm = 60, limit = 80) {
+    const qs = new URLSearchParams({
+      lat: String(lat),
+      lon: String(lon),
+      radius_km: String(radiusKm),
+      limit: String(limit),
+    });
+    return getJson(`/stations/live?${qs.toString()}`);
+  },
+  getFiresNearby(lat, lon, radiusKm = 80, days = 2) {
+    const qs = new URLSearchParams({
+      lat: String(lat),
+      lon: String(lon),
+      radius_km: String(radiusKm),
+      days: String(days),
+    });
+    return getJson(`/fires/nearby?${qs.toString()}`);
+  },
   getGovRecommendations(cityId = "DELHI") {
     const qs = new URLSearchParams({ city_id: cityId });
     return getJson(`/gov/recommendations?${qs.toString()}`);
@@ -92,5 +110,8 @@ export const api = {
   },
   getDelhiWardsGrid() {
     return getJson(`/geojson/delhi-wards-grid`);
+  },
+  getNewDelhiBoundary() {
+    return getJson(`/geojson/new-delhi-boundary`);
   },
 };

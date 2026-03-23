@@ -70,6 +70,7 @@ def detect_pollution_sources(
     ts_utc: datetime,
     tz_name: str = "Asia/Kolkata",
     satellite: dict[str, Any] | None = None,
+    fire_nearby: bool = False,
     history: list[tuple[datetime, dict[str, Any]]] | None = None,
 ) -> SourceDetectionResult:
     """
@@ -126,11 +127,20 @@ def detect_pollution_sources(
         except Exception:
             fire_hotspots = 0.0
     s_fire = _scale(fire_hotspots, 1.0, 10.0)
+    s_firms = 1.0 if fire_nearby else 0.0
 
     # Source scores (0..1, later normalized)
     traffic = 0.50 * s_no2 + 0.15 * s_co + 0.20 * (1.0 if is_peak else 0.0) + 0.15 * s_wind_low
     dust = 0.55 * s_pm10 + 0.15 * s_ratio_dust + 0.20 * s_wind_low + 0.10 * (1.0 if is_day else 0.0)
-    biomass = 0.55 * s_pm25 + 0.15 * (1.0 if is_night else 0.0) + 0.15 * s_humid + 0.10 * s_wind_low + 0.05 * s_fire
+    # If a FIRMS hotspot is nearby, strongly bias towards Biomass Burning (explicit override signal).
+    biomass = (
+        0.55 * s_pm25
+        + 0.15 * (1.0 if is_night else 0.0)
+        + 0.15 * s_humid
+        + 0.10 * s_wind_low
+        + 0.05 * s_fire
+        + 0.80 * s_firms
+    )
     industrial = 0.65 * s_so2 + 0.15 * s_no2 + 0.10 * s_wind_low + 0.10 * (1.0 if is_night else 0.0)
 
     scores = {
@@ -139,6 +149,9 @@ def detect_pollution_sources(
         "Biomass Burning": float(biomass),
         "Industrial Emissions": float(industrial),
     }
+    # Explicit rule: if FIRMS reports a hotspot nearby, treat biomass burning as the primary source.
+    if fire_nearby:
+        scores["Biomass Burning"] = float(scores["Biomass Burning"]) + 10.0
 
     total = sum(scores.values())
     if total <= 1e-9:
@@ -184,6 +197,8 @@ def detect_pollution_sources(
             reasons.append("High humidity increases particle persistence")
         if s_fire >= 0.5:
             reasons.append("Satellite fire hotspot signal (optional)")
+        if s_firms >= 0.5:
+            reasons.append("FIRMS hotspot detected nearby (satellite)")
     elif p_label.startswith("Industrial"):
         if s_so2 >= 0.35:
             reasons.append("Elevated SO₂ suggests industrial sources")
@@ -245,4 +260,3 @@ def detect_pollution_sources(
             },
         },
     )
-

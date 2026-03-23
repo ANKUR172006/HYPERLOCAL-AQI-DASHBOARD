@@ -144,10 +144,28 @@ export function useEnvironmentUnified(lat, lon, refresh = false) {
   );
 }
 
+export function useStationsLive(lat, lon, radiusKm = 60, limit = 80) {
+  return useAsync(
+    lat && lon ? () => api.getStationsLive(lat, lon, radiusKm, limit) : null,
+    [lat, lon, radiusKm, limit]
+  );
+}
+
+export function useFiresNearby(lat, lon, radiusKm = 80, days = 2) {
+  return useAsync(
+    lat && lon ? () => api.getFiresNearby(lat, lon, radiusKm, days) : null,
+    [lat, lon, radiusKm, days]
+  );
+}
+
 export function useDelhiBoundary() {
   return useAsync(() => api.getDelhiBoundary(), []);
 }
 
 export function useDelhiWardsGrid() {
   return useAsync(() => api.getDelhiWardsGrid(), []);
+}
+
+export function useNewDelhiBoundary() {
+  return useAsync(() => api.getNewDelhiBoundary(), []);
 }

@@ -14,6 +14,7 @@ from app.services.collectors.satellite_collector import SatelliteCollector
 from app.services.collectors.weather_collector import WeatherCollector
 from app.services.cpcb_source import CpcbSource, StationObservation
 from app.services.processing.environmental_processing import PollutionVector, align_to_hour, validate_pollution
+from app.services.source_detection import detect_pollution_sources
 
 
 def _utc_now() -> datetime:
@@ -38,6 +39,7 @@ class UnifiedEnvironmentalRecord:
     pollution: dict[str, Any]
     weather: dict[str, Any]
     satellite: dict[str, Any]
+    fires: dict[str, Any]
 
 
 class EnvironmentalIngestionService:
@@ -46,12 +48,16 @@ class EnvironmentalIngestionService:
         self.weather = WeatherCollector()
         self.satellite = SatelliteCollector()
         self.location = LocationCollector()
+        from app.services.collectors.firms_collector import FirmsCollector
+
+        self.firms = FirmsCollector()
 
     def ingest_for_coordinates(self, lat: float, lon: float) -> UnifiedEnvironmentalRecord:
         stations = self._load_cpcb()
         nearest = self._nearest_station(stations, lat, lon)
         weather = self.weather.fetch(lat, lon)
         sat = self.satellite.fetch(lat, lon, _utc_now().date().isoformat())
+        fires = self.firms.fetch_nearby(lat=lat, lon=lon, radius_km=10.0, days=1)
         loc = self.location.reverse_geocode(lat, lon)
         pollution_vec = validate_pollution(
             PollutionVector(
@@ -78,6 +84,25 @@ class EnvironmentalIngestionService:
         self.db.commit()
 
         ward_name = loc.ward or loc.sublocality or "Unknown ward"
+        det = detect_pollution_sources(
+            pollutants={
+                "pm25": pollution_vec.pm25,
+                "pm10": pollution_vec.pm10,
+                "no2": pollution_vec.no2,
+                "so2": pollution_vec.so2,
+                "o3": pollution_vec.o3,
+                "co": pollution_vec.co,
+            },
+            weather={
+                "wind_speed": weather.wind_speed_10m,
+                "humidity": weather.relativehumidity_2m,
+                "temperature": weather.temperature_2m,
+            },
+            ts_utc=reading_ts,
+            satellite=None,
+            fire_nearby=bool(fires.get("fireNearby")),
+            history=None,
+        )
         return UnifiedEnvironmentalRecord(
             location={
                 "city": city_name,
@@ -97,6 +122,14 @@ class EnvironmentalIngestionService:
                 "NH3": pollution_vec.nh3,
                 "station_name": nearest.station_name if nearest else "",
                 "timestamp": reading_ts.isoformat(),
+                "source_detection": {
+                    "primary": det.primary,
+                    "secondary": det.secondary,
+                    "reasons": det.reasons,
+                    "trend": det.trend,
+                    "fires": fires.get("fires", []),
+                    "fireNearby": bool(fires.get("fireNearby")),
+                },
             },
             weather={
                 "temperature": weather.temperature_2m,
@@ -112,6 +145,7 @@ class EnvironmentalIngestionService:
                 "timestamp": sat.ts_utc.isoformat(),
                 "metadata": sat.imagery_metadata,
             },
+            fires=fires,
         )
 
     def latest_for_coordinates(self, lat: float, lon: float) -> UnifiedEnvironmentalRecord:
@@ -158,6 +192,7 @@ class EnvironmentalIngestionService:
                 "timestamp": recent_sat.ts_utc.isoformat() if recent_sat else None,
                 "metadata": recent_sat.imagery_metadata_json if recent_sat else {},
             },
+            fires={"fires": [], "fireNearby": False, "enabled": False, "reason": "not_cached"},
         )
 
     def _load_cpcb(self) -> list[StationObservation]:

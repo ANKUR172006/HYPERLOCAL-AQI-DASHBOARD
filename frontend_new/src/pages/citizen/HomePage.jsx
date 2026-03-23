@@ -81,6 +81,13 @@ export default function HomePage({ onNavigate }) {
   const detectionSecondary = det?.secondary || null;
   const detectionReasons = Array.isArray(det?.reasons) ? det.reasons : [];
   const confidence = Number.isFinite(detectionPrimary?.confidence) ? detectionPrimary.confidence : 64;
+  const firesPayload = env.data?.data?.fires || {};
+  const fires = Array.isArray(firesPayload?.fires) ? firesPayload.fires : [];
+  const fireNearby = Boolean(firesPayload?.fireNearby ?? det?.fireNearby);
+  const satellite = env.data?.data?.satellite || {};
+  const satSource = safeStr(satellite?.source, "—");
+  const satMeta = satellite?.metadata || {};
+  const satHotspots = safeNum(satMeta?.hotspot_count, fires.length);
 
   return (
     <div className="dash" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -216,7 +223,45 @@ export default function HomePage({ onNavigate }) {
           </div>
         </div>
       </div>
+
+      <div className="card card-elevated">
+        <SectionHeader
+          title="Satellite & Fires"
+          right={<Badge tone={fireNearby ? "danger" : "success"}>{fireNearby ? "Fire nearby" : "No nearby fire"}</Badge>}
+        />
+        <div style={{ padding: 16, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 14 }}>
+          <div className="mini">
+            <div className="mini-k">Satellite source</div>
+            <div className="mini-v" style={{ gap: 8 }}>
+              <Icon name={satSource.toLowerCase().includes("firms") ? "flame" : "satellite"} size={16} />
+              <span style={{ fontFamily: "var(--font-mono)", fontWeight: 700 }}>{satSource}</span>
+            </div>
+            <div className="mini-s">{safeStr(satMeta?.note, "—")}</div>
+          </div>
+          <div className="mini">
+            <div className="mini-k">Hotspots</div>
+            <div className="mini-v">
+              <span style={{ fontFamily: "var(--font-mono)", fontWeight: 750 }}>{Number.isFinite(satHotspots) ? satHotspots : fires.length}</span>
+              <span className="mini-d">last {1} day</span>
+            </div>
+            <div className="mini-s">{fireNearby ? "Biomass burning likely" : "No hotspot within radius"}</div>
+          </div>
+          <div className="mini" style={{ gridColumn: "1 / -1" }}>
+            <div className="mini-k">Nearest detections</div>
+            {fires.length ? (
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 8 }}>
+                {fires.slice(0, 4).map((f, idx) => (
+                  <span key={idx} className="tag" style={{ fontFamily: "var(--font-mono)" }}>
+                    {safeNum(f?.lat, 0).toFixed(4)}, {safeNum(f?.lon, 0).toFixed(4)} · {safeStr(f?.confidence, "—")}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div className="muted" style={{ marginTop: 8 }}>No FIRMS detections in the selected box.</div>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
-

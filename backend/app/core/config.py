@@ -27,6 +27,9 @@ def _default_cpcb_file_path() -> str:
 def _default_delhi_boundary_geojson_path() -> str:
     return str((_backend_dir() / "data" / "Delhi_Boundary.geojson").resolve())
 
+def _default_delhi_wards_geojson_path() -> str:
+    return str((_backend_dir() / "data" / "Delhi_Wards.geojson").resolve())
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
@@ -53,6 +56,8 @@ class Settings(BaseSettings):
     cpcb_api_url: str = "/resource/3b01bcb8-0b14-4abf-b6f2-c1bfd384ba69"
     # Optional. If unset, live CPCB pulls may fail; the app will still work in `file` mode.
     cpcb_api_key: str | None = Field(default=None, validation_alias=AliasChoices("CPCB_API_KEY"))
+    # CPCB "station counts" metadata (state/UT-level counts). Uses the same CPCB_API_KEY.
+    cpcb_station_counts_api_url: str = "/resource/4933f0fd-158e-4098-ac0a-dfe69d5ff8c3"
     cpcb_api_format: str = "json"
     cpcb_api_offset: int = 0
     cpcb_api_limit: int = 10
@@ -64,8 +69,14 @@ class Settings(BaseSettings):
     # Prefer the imagery endpoint (supports `cloud_score=true` JSON responses) for demo-friendly "satellite signal".
     nasa_earth_base_url: str = "https://api.nasa.gov/planetary/earth/imagery"
     nominatim_base_url: str = "https://nominatim.openstreetmap.org/reverse"
+    nominatim_search_url: str = "https://nominatim.openstreetmap.org/search"
     # Optional. If unset, satellite data will be disabled (graceful fallback).
     nasa_api_key: str | None = Field(default=None, validation_alias=AliasChoices("NASA_API_KEY"))
+    # NASA FIRMS (Fire Information for Resource Management System) map key.
+    # Used to fetch fire hotspots (CSV) for a bounding box via the FIRMS API.
+    firms_map_key: str | None = Field(default=None, validation_alias=AliasChoices("FIRMS_MAP_KEY", "NASA_FIRMS_MAP_KEY"))
+    # Use the global FIRMS API base by default (works outside US/Canada).
+    firms_base_url: str = "https://firms.modaps.eosdis.nasa.gov/api"
     # NASA can be slow intermittently; keep a slightly higher default timeout + retry.
     nasa_timeout_sec: float = 12.0
     nasa_max_retries: int = 2
@@ -94,6 +105,10 @@ class Settings(BaseSettings):
 
     # Optional GeoJSON overlays (for offline/demo use)
     delhi_boundary_geojson_path: str = Field(default_factory=_default_delhi_boundary_geojson_path)
+    delhi_wards_geojson_path: str = Field(
+        default_factory=_default_delhi_wards_geojson_path,
+        validation_alias=AliasChoices("DELHI_WARDS_GEOJSON_PATH"),
+    )
 
 
 settings = Settings()

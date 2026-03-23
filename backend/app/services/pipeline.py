@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from random import Random
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -436,11 +436,31 @@ class PipelineService:
         )
 
     def load_clean_station_vectors(self, ts_slot: datetime) -> list[StationObservation]:
+        base_stmt = select(CleanMeasurement).where(
+            CleanMeasurement.ts_slot_utc == ts_slot,
+            CleanMeasurement.qa_status == "ACCEPTED",
+        )
+
+        # Live runs can accumulate mixed sources inside the same hour slot:
+        # e.g. a first run falls back to bundled `cpcb_file` stations, then a later run succeeds with `cpcb_api`.
+        # For "live Delhi" demos we prefer the real CPCB API feed when it's present.
+        has_api = (
+            self.db.execute(
+                select(func.count())
+                .select_from(CleanMeasurement)
+                .where(
+                    CleanMeasurement.ts_slot_utc == ts_slot,
+                    CleanMeasurement.qa_status == "ACCEPTED",
+                    CleanMeasurement.source == "cpcb_api",
+                )
+            ).scalar_one()
+            > 0
+        )
+
+        preferred_sources: set[str] | None = {"cpcb_api"} if has_api else None
         accepted = self.db.scalars(
-            select(CleanMeasurement).where(CleanMeasurement.ts_slot_utc == ts_slot, CleanMeasurement.qa_status == "ACCEPTED")
+            base_stmt.where(CleanMeasurement.source.in_(preferred_sources)) if preferred_sources else base_stmt
         ).all()
-        if not accepted:
-            return []
 
         by_station: dict[str, dict[str, float]] = defaultdict(dict)
         for row in accepted:
@@ -475,9 +495,46 @@ class PipelineService:
                     humidity=55.0,
                     temperature=28.0,
                     observed_at_utc=ts_slot,
-                    source="qa_clean",
+                    source="qa_clean:cpcb_api" if has_api else "qa_clean",
                 )
             )
+        if preferred_sources and not out:
+            # If API rows exist but don't produce any complete station vectors, fall back to any accepted source.
+            accepted = self.db.scalars(base_stmt).all()
+            by_station = defaultdict(dict)
+            for row in accepted:
+                if row.clean_value is None:
+                    continue
+                by_station[row.station_code][self._norm_pollutant_id(row.pollutant_id)] = float(row.clean_value)
+            station_rows = self.db.scalars(select(Station).where(Station.station_code.in_(list(by_station.keys())))).all()
+            station_meta = {s.station_code: s for s in station_rows}
+            out = []
+            for code, pols in by_station.items():
+                if not all(k in pols for k in ("PM25", "PM10", "NO2", "SO2", "O3", "CO")):
+                    continue
+                meta = station_meta.get(code)
+                if meta is None:
+                    continue
+                out.append(
+                    StationObservation(
+                        station_id=code,
+                        station_name=meta.station_name,
+                        latitude=float(meta.latitude),
+                        longitude=float(meta.longitude),
+                        pm25=float(pols["PM25"]),
+                        pm10=float(pols["PM10"]),
+                        no2=float(pols["NO2"]),
+                        so2=float(pols["SO2"]),
+                        o3=float(pols["O3"]),
+                        co=float(pols["CO"]),
+                        wind_speed=2.5,
+                        wind_direction=180.0,
+                        humidity=55.0,
+                        temperature=28.0,
+                        observed_at_utc=ts_slot,
+                        source="qa_clean",
+                    )
+                )
         return out
 
     def interpolate_wards(self, ts_slot: datetime, stations: list[StationObservation], wards: list[Ward]) -> list[WardObservation]:

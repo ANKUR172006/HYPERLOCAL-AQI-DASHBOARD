@@ -18,6 +18,13 @@ backend/*.db
 backend/uvicorn.out.log
 backend/uvicorn.err.log
 
+# Backend-served frontend build output (generated)
+backend/app/static/*
+!backend/app/static/.gitkeep
+
+# Local tools (downloaded binaries)
+tools/
+
 # Local cache folders created by some tools/runners
 pytest-cache-files-*/
 pytest-cache-files-*

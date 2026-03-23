@@ -20,9 +20,17 @@ Optional environment variables for live feed wiring:
 ```powershell
 $env:CPCB_SOURCE_MODE="api"    # api | file | hybrid
 $env:CPCB_FILE_PATH="data/cpcb_delhi_sample.csv"
-$env:CPCB_API_URL="YOUR_CPCB_ENDPOINT"
+$env:CPCB_API_URL="/resource/3b01bcb8-0b14-4abf-b6f2-c1bfd384ba69"
 $env:CPCB_API_KEY=""
 ```
+
+State/UT station-count metadata (CAAQMS + NAMP counts) uses a separate dataset and the same key:
+
+```powershell
+$env:CPCB_STATION_COUNTS_API_URL="/resource/4933f0fd-158e-4098-ac0a-dfe69d5ff8c3"
+```
+
+API: `GET /v1/cpcb/station-counts`
 
 Install `xgboost` to enable true XGBoost forecasts; without it, backend uses a momentum fallback model.
 

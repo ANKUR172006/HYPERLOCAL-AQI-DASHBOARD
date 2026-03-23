@@ -16,11 +16,14 @@ from sqlalchemy.orm import Session
 from app.core.errors import AppError
 from app.core.config import settings
 from app.db.session import get_db
-from app.models.entities import AqiSnapshot, City, Complaint, CrisisEvent, ForecastSnapshot, SatelliteData, Ward, WeatherData
+from app.models.entities import AqiSnapshot, City, CleanMeasurement, Complaint, CrisisEvent, ForecastSnapshot, SatelliteData, Station, Ward, WeatherData
 from app.services.cpcb_source import CpcbSource
 from app.services.cpcb_source import StationObservation
+from app.services.cpcb_station_counts import fetch_cpcb_station_counts
 from app.services.collectors.http_client import get_recent_api_checks
+from app.services.collectors.boundary_collector import BoundaryCollector
 from app.services.environmental_ingestion_service import EnvironmentalIngestionService
+from app.services.collectors.firms_collector import FirmsCollector
 from app.services.pipeline import calc_sub_index, aqi_category
 from app.services.source_detection import detect_pollution_sources
 
@@ -551,6 +554,10 @@ def ward_aqi(ward_id: str, db: Session = Depends(get_db)) -> dict:
     pollutants = {k: raw.get(k) for k in ("pm25", "pm10", "no2", "so2", "co", "o3")}
     weather = _latest_weather_dict(db)
     satellite = _latest_satellite_dict(db)
+    ward = db.get(Ward, ward_id)
+    w_lat = float(ward.centroid_lat) if ward and ward.centroid_lat is not None else 28.6139
+    w_lon = float(ward.centroid_lon) if ward and ward.centroid_lon is not None else 77.2090
+    firms = FirmsCollector().fetch_nearby(lat=w_lat, lon=w_lon, radius_km=10.0, days=1, source="VIIRS_SNPP_NRT")
     hist_rows = db.scalars(
         select(AqiSnapshot)
         .where(AqiSnapshot.ward_id == ward_id, AqiSnapshot.ts_utc >= datetime.now(timezone.utc) - timedelta(hours=6))
@@ -565,6 +572,7 @@ def ward_aqi(ward_id: str, db: Session = Depends(get_db)) -> dict:
         weather=weather,
         ts_utc=current.ts_utc,
         satellite=satellite,
+        fire_nearby=bool(firms.get("fireNearby")),
         history=history if len(history) >= 4 else None,
     )
     return envelope(
@@ -582,6 +590,8 @@ def ward_aqi(ward_id: str, db: Session = Depends(get_db)) -> dict:
                 "secondary": det.secondary,
                 "reasons": det.reasons,
                 "trend": det.trend,
+                "fires": firms.get("fires", []),
+                "fireNearby": bool(firms.get("fireNearby")),
             },
         },
     )
@@ -616,15 +626,37 @@ def aqi_forecast(ward_id: str, horizon: int = 1, db: Session = Depends(get_db)) 
             gen_ts = gen_ts.replace(tzinfo=timezone.utc)
     stale = forecast is None or (gen_ts is not None and (now - gen_ts) > timedelta(hours=2))
     if stale:
+        # Prefer a small "recent" window (keeps the trend model meaningful), but don't fail hard during startup:
+        # if a ward has any snapshot at all (even older), return a forecast with lower confidence instead of 404.
         recent = db.scalars(
             select(AqiSnapshot)
             .where(AqiSnapshot.ward_id == ward_id, AqiSnapshot.ts_utc >= now - timedelta(hours=6))
             .order_by(AqiSnapshot.ts_utc.desc())
             .limit(4)
         ).all()
+        fallback_note = None
         if not recent:
-            raise AppError("DATA_NOT_READY", f"No forecast available for {ward_id} (no recent AQI snapshot).", 404)
-        latest = recent[0]
+            latest = db.scalars(
+                select(AqiSnapshot).where(AqiSnapshot.ward_id == ward_id).order_by(AqiSnapshot.ts_utc.desc())
+            ).first()
+            if latest is None:
+                # City-level fallback: use the newest snapshot from the same city (helps newly-added wards).
+                ward = db.get(Ward, ward_id)
+                if ward is not None:
+                    latest = db.scalars(
+                        select(AqiSnapshot)
+                        .join(Ward, Ward.ward_id == AqiSnapshot.ward_id)
+                        .where(Ward.city_id == ward.city_id)
+                        .order_by(AqiSnapshot.ts_utc.desc())
+                    ).first()
+                    if latest is not None:
+                        fallback_note = f"city_fallback:{ward.city_id}"
+            if latest is None:
+                raise AppError("DATA_NOT_READY", f"No forecast available for {ward_id} (no AQI snapshot).", 404)
+            recent = [latest]
+            fallback_note = fallback_note or "stale_snapshot"
+        else:
+            latest = recent[0]
 
         aqi_pred = int(latest.aqi_value)
         model_name = "naive-live"
@@ -639,6 +671,8 @@ def aqi_forecast(ward_id: str, horizon: int = 1, db: Session = Depends(get_db)) 
                 aqi_pred = _clamp_aqi(float(latest.aqi_value) + slope * float(horizon))
                 model_name = "local-trend"
                 model_version = "trend-v1"
+        if fallback_note:
+            model_name = f"{model_name}:{fallback_note}"
 
         # Upsert forecast for this hour slot so the UI stops "jumping" on refresh.
         slot_row = db.scalars(
@@ -692,6 +726,10 @@ def pollutant_breakdown(ward_id: str, db: Session = Depends(get_db)) -> dict:
     pollutants = {k: raw.get(k) for k in ("pm25", "pm10", "no2", "so2", "co", "o3")}
     weather = _latest_weather_dict(db)
     satellite = _latest_satellite_dict(db)
+    ward = db.get(Ward, ward_id)
+    w_lat = float(ward.centroid_lat) if ward and ward.centroid_lat is not None else 28.6139
+    w_lon = float(ward.centroid_lon) if ward and ward.centroid_lon is not None else 77.2090
+    firms = FirmsCollector().fetch_nearby(lat=w_lat, lon=w_lon, radius_km=10.0, days=1, source="VIIRS_SNPP_NRT")
     hist_rows = db.scalars(
         select(AqiSnapshot)
         .where(AqiSnapshot.ward_id == ward_id, AqiSnapshot.ts_utc >= datetime.now(timezone.utc) - timedelta(hours=6))
@@ -706,6 +744,7 @@ def pollutant_breakdown(ward_id: str, db: Session = Depends(get_db)) -> dict:
         weather=weather,
         ts_utc=current.ts_utc,
         satellite=satellite,
+        fire_nearby=bool(firms.get("fireNearby")),
         history=history if len(history) >= 4 else None,
     )
     return envelope(
@@ -720,6 +759,8 @@ def pollutant_breakdown(ward_id: str, db: Session = Depends(get_db)) -> dict:
                 "secondary": det.secondary,
                 "reasons": det.reasons,
                 "trend": det.trend,
+                "fires": firms.get("fires", []),
+                "fireNearby": bool(firms.get("fireNearby")),
             },
         },
     )
@@ -899,11 +940,26 @@ def geojson_delhi_boundary() -> dict:
 
 @router.get("/geojson/delhi-wards-grid")
 def geojson_delhi_wards_grid() -> dict:
+    # Prefer real wards when a GeoJSON file is provided (e.g. `DELHI_WARDS_GEOJSON_PATH`).
+    try:
+        if settings.delhi_wards_geojson_path:
+            wards_geo = _load_geojson_file(settings.delhi_wards_geojson_path)
+            if isinstance(wards_geo, dict) and (wards_geo.get("features") or []):
+                return {
+                    "timestamp": utc_now_iso(),
+                    "city_id": "DELHI",
+                    "path": settings.delhi_wards_geojson_path,
+                    "data": wards_geo,
+                    "note": "Real ward polygons loaded from GeoJSON.",
+                }
+    except Exception:
+        wards_geo = None
+
     return {
         "timestamp": utc_now_iso(),
         "city_id": "DELHI",
         "data": _delhi_ward_grid_geojson(),
-        "note": "Prototype ward polygons (grid) for choropleth rendering. Replace with real ward GeoJSON for production.",
+        "note": "Prototype ward polygons (grid) for choropleth rendering. Set DELHI_WARDS_GEOJSON_PATH for real wards.",
     }
 
 
@@ -998,6 +1054,46 @@ def cpcb_nearest_stations(
         "count": min(top_n, len(ranked)),
         "data": ranked[:top_n],
         "source": settings.cpcb_source_mode,
+    }
+
+
+@router.get("/cpcb/station-counts")
+def cpcb_station_counts(
+    state_union_territory: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> dict:
+    """
+    State/UT-level station-count metadata from api.data.gov.in (CAAQMS + NAMP counts).
+
+    Note: this is not a live "per station pollutant" feed.
+    """
+    if not (settings.cpcb_api_key and str(settings.cpcb_api_key).strip()):
+        raise AppError("BAD_REQUEST", "CPCB_API_KEY is required for api.data.gov.in requests.", 400)
+
+    try:
+        payload = fetch_cpcb_station_counts(state_union_territory=state_union_territory, limit=limit, offset=offset)
+    except Exception as exc:
+        raise AppError(
+            "UPSTREAM_TIMEOUT",
+            "api.data.gov.in timed out for CPCB station-counts. Try a smaller limit (e.g., 50) "
+            "or increase EXTERNAL_HTTP_TIMEOUT_SEC (e.g., 25).",
+            504,
+            details={"error": str(exc)},
+        )
+    records = (payload or {}).get("records") or []
+    return {
+        "timestamp": utc_now_iso(),
+        "query": {
+            "state_union_territory": state_union_territory,
+            "limit": int(limit),
+            "offset": int(offset),
+        },
+        "source": "api.data.gov.in",
+        "dataset": settings.cpcb_station_counts_api_url,
+        "count": len(records),
+        "total": (payload or {}).get("total"),
+        "data": records,
     }
 
 
@@ -1455,6 +1551,7 @@ def ingest_environment(lat: float, lon: float, db: Session = Depends(get_db)) ->
             "pollution": unified.pollution,
             "weather": unified.weather,
             "satellite": unified.satellite,
+            "fires": unified.fires,
         },
     }
 
@@ -1471,6 +1568,7 @@ def environment_unified(lat: float, lon: float, refresh: bool = False, db: Sessi
             "pollution": unified.pollution,
             "weather": unified.weather,
             "satellite": unified.satellite,
+            "fires": unified.fires,
         },
     }
 
@@ -1482,3 +1580,142 @@ def environment_api_checks(limit: int = 100) -> dict:
         "count": len(get_recent_api_checks(limit)),
         "data": get_recent_api_checks(limit),
     }
+
+
+@router.get("/fires/nearby")
+def fires_nearby(lat: float, lon: float, radius_km: float = 10.0, days: int = 1, source: str = "VIIRS_SNPP_NRT") -> dict:
+    payload = FirmsCollector().fetch_nearby(lat=lat, lon=lon, radius_km=radius_km, days=days, source=source)
+    return {"timestamp": utc_now_iso(), **payload}
+
+
+@router.get("/geojson/new-delhi-boundary")
+def geojson_new_delhi_boundary() -> dict:
+    snap = BoundaryCollector().fetch_new_delhi_boundary()
+    return {
+        "timestamp": utc_now_iso(),
+        "name": snap.name,
+        "source": snap.source,
+        "data": snap.geojson,
+    }
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    import math
+
+    r = 6371.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+@router.get("/stations/live")
+def stations_live(
+    lat: float | None = None,
+    lon: float | None = None,
+    radius_km: float = 60.0,
+    limit: int = 60,
+    db: Session = Depends(get_db),
+) -> dict:
+    """
+    Returns latest CPCB station vectors (pollutants) + derived AQI.
+
+    Used by the Explore Map UI for a realistic sensor layer.
+    """
+    ts_slot = db.execute(
+        select(func.max(CleanMeasurement.ts_slot_utc)).where(CleanMeasurement.qa_status == "ACCEPTED")
+    ).scalar_one()
+    if ts_slot is None:
+        return {"timestamp": utc_now_iso(), "ts_slot_utc": None, "count": 0, "data": []}
+
+    rows = db.execute(
+        select(
+            CleanMeasurement.station_code,
+            CleanMeasurement.pollutant_id,
+            CleanMeasurement.clean_value,
+            Station.station_name,
+            Station.latitude,
+            Station.longitude,
+        )
+        .join(Station, Station.station_code == CleanMeasurement.station_code)
+        .where(CleanMeasurement.ts_slot_utc == ts_slot, CleanMeasurement.qa_status == "ACCEPTED")
+    ).all()
+
+    by_station: dict[str, dict] = {}
+    for code, pollutant_id, clean_value, name, s_lat, s_lon in rows:
+        if clean_value is None:
+            continue
+        station = by_station.setdefault(
+            str(code),
+            {
+                "station_code": str(code),
+                "station_name": str(name or code),
+                "lat": float(s_lat),
+                "lon": float(s_lon),
+                "pollutants": {},
+            },
+        )
+        pol = str(pollutant_id or "").upper().strip()
+        station["pollutants"][pol] = float(clean_value)
+
+    out: list[dict] = []
+    for station in by_station.values():
+        pols = station["pollutants"]
+        if not all(k in pols for k in ("PM25", "PM10", "NO2", "SO2", "O3", "CO")):
+            continue
+        pm25 = float(pols["PM25"])
+        pm10 = float(pols["PM10"])
+        no2 = float(pols["NO2"])
+        so2 = float(pols["SO2"])
+        o3 = float(pols["O3"])
+        co = float(pols["CO"])
+
+        indices = {
+            "PM2.5": calc_sub_index(pm25, "pm25"),
+            "PM10": calc_sub_index(pm10, "pm10"),
+            "NO2": calc_sub_index(no2, "no2"),
+            "SO2": calc_sub_index(so2, "so2"),
+            "O3": calc_sub_index(o3, "o3"),
+            "CO": calc_sub_index(co, "co"),
+        }
+        dominant = max(indices, key=indices.get)
+        aqi = int(indices[dominant])
+        dist_km = None
+        if lat is not None and lon is not None:
+            dist_km = _haversine_km(float(lat), float(lon), float(station["lat"]), float(station["lon"]))
+            if dist_km > float(radius_km):
+                continue
+
+        out.append(
+            {
+                "station_code": station["station_code"],
+                "station_name": station["station_name"],
+                "lat": station["lat"],
+                "lon": station["lon"],
+                "aqi": aqi,
+                "category": aqi_category(aqi),
+                "dominant_pollutant": dominant,
+                "distance_km": round(float(dist_km), 2) if dist_km is not None else None,
+                "pollutants": {
+                    "pm25": round(pm25, 2),
+                    "pm10": round(pm10, 2),
+                    "no2": round(no2, 2),
+                    "so2": round(so2, 2),
+                    "o3": round(o3, 2),
+                    "co": round(co, 3),
+                },
+                "data_source": "CPCB",
+            }
+        )
+
+    # Prefer nearest stations if a center point is provided; else prefer highest AQI (map readability).
+    if lat is not None and lon is not None:
+        out.sort(key=lambda x: (x["distance_km"] is None, x["distance_km"] or 1e9))
+    else:
+        out.sort(key=lambda x: int(x.get("aqi") or 0), reverse=True)
+
+    limit = max(1, min(int(limit), 250))
+    out = out[:limit]
+    return {"timestamp": utc_now_iso(), "ts_slot_utc": ts_slot.isoformat(), "count": len(out), "data": out}
