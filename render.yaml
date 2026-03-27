@@ -15,17 +15,33 @@ services:
       # Keep external integrations on (CPCB/Open-Meteo/Nominatim/FIRMS) unless you want offline demos.
       - key: EXTERNAL_APIS_ENABLED
         value: "true"
+      - key: CPCB_SOURCE_MODE
+        value: "api"
       - key: ENABLE_EXTENDED_INGESTION
         value: "true"
-      # Recommended for Render: avoid duplicate background schedulers if multiple instances run.
+      # For a single Render web service, keep the scheduler on so data stays fresh.
       - key: ENABLE_SCHEDULER
-        value: "false"
+        value: "true"
       - key: ENABLE_XGBOOST_FORECASTING
         value: "true"
       - key: FORECAST_MODEL
         value: "auto"
       - key: LIVE_DATA_STRICT
-        value: "false"
+        value: "true"
+      - key: CPCB_FILTER_CITY
+        value: "Delhi"
+      - key: CPCB_FILTER_STATE
+        value: "Delhi"
+      - key: CPCB_API_LIMIT
+        value: "100"
+      - key: CPCB_API_MAX_PAGES
+        value: "4"
+      - key: IDW_NEAREST_N
+        value: "3"
+      - key: IDW_RADIUS_KM
+        value: "80"
+      - key: IDW_POWER
+        value: "3.0"
       # Secrets (set these in Render dashboard when prompted)
       - key: FIRMS_MAP_KEY
         sync: false
