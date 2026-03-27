@@ -1,4 +1,7 @@
+import { useState } from "react";
 import Icon from "../ui/Icon.jsx";
+import { useAppLocation } from "../../hooks/index.js";
+import { api } from "../../utils/api.js";
 
 const NAV = [
   { id: "home", label: "Home", icon: "home" },
@@ -9,6 +12,55 @@ const NAV = [
 ];
 
 export default function AppLayout({ page, onNavigate, theme, onThemeToggle, children }) {
+  const location = useAppLocation();
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleSearch(event) {
+    event?.preventDefault?.();
+    const q = String(query || "").trim();
+    if (q.length < 2) {
+      setError("Enter a city, area, district, or lat,lon.");
+      setResults([]);
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      const res = await api.searchLocations(q, 6);
+      const items = Array.isArray(res?.data) ? res.data : [];
+      setResults(items);
+      if (!items.length) setError("No location found.");
+    } catch (err) {
+      setResults([]);
+      setError(err?.message || "Search failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function applyLocation(item) {
+    if (!item) return;
+    location.setSelectedLocation({
+      lat: Number(item.lat),
+      lon: Number(item.lon),
+      label: String(item.display_name || "Selected location"),
+      source: "search",
+    });
+    setQuery(String(item.display_name || ""));
+    setResults([]);
+    setError("");
+  }
+
+  function clearLocation() {
+    location.clearSelectedLocation();
+    setResults([]);
+    setError("");
+    setQuery("");
+  }
+
   return (
     <div className="app-layout">
       <aside className="desktop-sidebar" aria-label="Sidebar">
@@ -54,7 +106,61 @@ export default function AppLayout({ page, onNavigate, theme, onThemeToggle, chil
           </div>
           <div style={{ fontWeight: 650 }}>Hyperlocal AQI</div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, justifyContent: "flex-end", minWidth: 0 }}>
+          <div style={{ position: "relative", width: "min(520px, 100%)" }}>
+            <form onSubmit={handleSearch} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search location"
+                style={{
+                  width: "100%",
+                  minHeight: 36,
+                  borderRadius: 10,
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  background: "rgba(255,255,255,0.04)",
+                  color: "var(--text-primary)",
+                  padding: "0 12px",
+                }}
+              />
+              <button className="btn btn-sm" type="submit">{loading ? "..." : "Search"}</button>
+              <button className="btn btn-sm" type="button" onClick={clearLocation}>
+                {location.hasSelectedLocation ? "Clear" : "Reset"}
+              </button>
+            </form>
+            <div className="muted" style={{ fontSize: "0.8125rem", marginTop: 6, textAlign: "right" }}>
+              Current: {location.label} {location.hasSelectedLocation ? "· searched" : "· default"}
+            </div>
+            {(results.length || error) ? (
+              <div style={{
+                position: "absolute",
+                top: "calc(100% + 8px)",
+                right: 0,
+                left: 0,
+                zIndex: 20,
+                background: "var(--bg-surface)",
+                border: "1px solid var(--border-subtle)",
+                borderRadius: 12,
+                boxShadow: "0 16px 40px rgba(0,0,0,0.18)",
+                padding: 10,
+                display: "grid",
+                gap: 8,
+              }}>
+                {error ? <div className="muted" style={{ fontSize: "0.8125rem" }}>{error}</div> : null}
+                {results.map((item, idx) => (
+                  <button
+                    key={`${item.lat}-${item.lon}-${idx}`}
+                    type="button"
+                    className="tag"
+                    onClick={() => applyLocation(item)}
+                    style={{ textAlign: "left", padding: "10px 12px", border: "1px solid rgba(255,255,255,0.08)", background: "rgba(255,255,255,0.03)" }}
+                  >
+                    {String(item.display_name || "Selected location")}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
           <button className="btn btn-sm" onClick={() => onNavigate("officer")}>
             <Icon name="building" size={14} /> Officer
           </button>

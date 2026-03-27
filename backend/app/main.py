@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 import asyncio
 import logging
+import os
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -26,9 +27,9 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     configure_logging()
+    in_pytest = os.getenv("PYTEST_CURRENT_TEST") is not None
 
-    # Never block startup on DB init / pipeline work (Railway healthchecks).
-    def _startup_background() -> None:
+    def _startup_work() -> None:
         db = SessionLocal()
         try:
             init_db()
@@ -39,9 +40,14 @@ async def lifespan(_: FastAPI):
         finally:
             db.close()
 
-    asyncio.create_task(asyncio.to_thread(_startup_background))
+    if in_pytest:
+        _startup_work()
+    else:
+        # Never block startup on DB init / pipeline work in app runtime.
+        asyncio.create_task(asyncio.to_thread(_startup_work))
     try:
-        maybe_start_scheduler()
+        if not in_pytest:
+            maybe_start_scheduler()
     except Exception:
         logger.exception("Scheduler failed to start; continuing without scheduler")
     yield

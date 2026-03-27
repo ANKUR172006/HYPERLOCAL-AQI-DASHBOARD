@@ -60,6 +60,38 @@ npm run dev
 
 Frontend URL: `http://127.0.0.1:5173`
 
+## Deploy on Render (single service)
+
+This repo is Render-ready as a single Docker web service.
+
+- Render should use the root `Dockerfile`.
+- The Docker build compiles `frontend_new` and copies the built files into `backend/app/static`.
+- FastAPI serves both the API and the frontend from the same service.
+- Use a persistent disk and set `RENDER_DISK_PATH=/var/data` so SQLite survives redeploys and restarts.
+- Recommended health check: `/v1/health`
+
+Recommended Render env vars:
+
+```text
+EXTERNAL_APIS_ENABLED=true
+ENABLE_EXTENDED_INGESTION=true
+ENABLE_SCHEDULER=false
+ENABLE_XGBOOST_FORECASTING=true
+FORECAST_MODEL=auto
+LIVE_DATA_STRICT=false
+RENDER_DISK_PATH=/var/data
+```
+
+Required secrets:
+
+```text
+CPCB_API_KEY=...
+FIRMS_MAP_KEY=...
+NASA_API_KEY=...   # optional but recommended
+```
+
+The repo-level `render.yaml` is configured for this setup.
+
 ## Deploy on Railway (single service)
 
 This repo ships a root `Dockerfile` that builds `frontend_new` and serves it via the FastAPI backend.

@@ -1,10 +1,11 @@
 $ErrorActionPreference = "Stop"
 
 # Live mode: force settings that should always be ON for the demo.
-$env:ENABLE_EXTENDED_INGESTION = "false"
+$env:ENABLE_EXTENDED_INGESTION = "true"
 $env:ENABLE_SCHEDULER = "true"
 $env:ENABLE_XGBOOST_FORECASTING = "true"
-$env:FORECAST_MODEL = "xgboost"
+$env:FORECAST_MODEL = "auto"
+$env:LIVE_DATA_STRICT = "true"
 
 # Live CPCB via api.data.gov.in (real-time-ish)
 $env:EXTERNAL_APIS_ENABLED = "true"
@@ -22,9 +23,7 @@ if (-not $key) {
 if ($key) {
   $env:CPCB_SOURCE_MODE = "api"
 } else {
-  # Without CPCB_API_KEY, api.data.gov.in responds with 400; use hybrid to fall back to bundled sample data.
-  $env:CPCB_SOURCE_MODE = "hybrid"
-  Write-Host "CPCB_API_KEY not set; using CPCB_SOURCE_MODE=hybrid (falls back to sample data). Set CPCB_API_KEY for live pulls." -ForegroundColor Yellow
+  throw "CPCB_API_KEY not set. Live mode refuses fallback/sample data."
 }
 
 # NASA "satellite signal" can be slow; use a higher default timeout for live demos.
@@ -39,10 +38,27 @@ if (-not $env:CPCB_FILTER_STATE) { $env:CPCB_FILTER_STATE = "Delhi" }
 if (-not $env:CPCB_API_LIMIT) { $env:CPCB_API_LIMIT = "100" }
 if (-not $env:CPCB_API_MAX_PAGES) { $env:CPCB_API_MAX_PAGES = "4" }
 
-# Make the interpolation more "local" (closer to Pragati Maidan).
-if (-not $env:IDW_NEAREST_N) { $env:IDW_NEAREST_N = "6" }
-if (-not $env:IDW_RADIUS_KM) { $env:IDW_RADIUS_KM = "15" }
-if (-not $env:IDW_POWER) { $env:IDW_POWER = "2.0" }
+if (-not $env:FIRMS_MAP_KEY) {
+  $envPath = Join-Path $PSScriptRoot ".env"
+  if (Test-Path $envPath) {
+    $line = Get-Content $envPath -ErrorAction SilentlyContinue | Where-Object { $_ -match '^\s*FIRMS_MAP_KEY\s*=' } | Select-Object -Last 1
+    if ($line) {
+      $env:FIRMS_MAP_KEY = ($line -split "=", 2)[1].Trim().Trim('"').Trim("'")
+    }
+  }
+}
+if (-not $env:FIRMS_MAP_KEY) {
+  throw "FIRMS_MAP_KEY not set. Live mode refuses disabled fire data."
+}
+
+if (-not $env:NASA_API_KEY) {
+  Write-Host "NASA_API_KEY not set; satellite layer will use live FIRMS proxy instead of NASA Earth imagery." -ForegroundColor Yellow
+}
+
+# IDW: use all stations within 80km, pick 3 nearest, high power so closer stations dominate.
+if (-not $env:IDW_NEAREST_N) { $env:IDW_NEAREST_N = "3" }
+if (-not $env:IDW_RADIUS_KM) { $env:IDW_RADIUS_KM = "80" }
+if (-not $env:IDW_POWER) { $env:IDW_POWER = "3.0" }
 
 function Test-PortFree([int]$Port) {
   try {
@@ -63,9 +79,32 @@ function Get-ListenerPid([int]$Port) {
   }
 }
 
+function Stop-PythonListenerIfSafe([int]$Port) {
+  $pid = Get-ListenerPid $Port
+  if (-not $pid) { return $false }
+  try {
+    $proc = Get-Process -Id $pid -ErrorAction Stop
+    $name = ($proc.ProcessName | Out-String).Trim()
+    if ($name -notmatch '^(python|python3|py|uvicorn)$') {
+      return $false
+    }
+    Write-Host "Stopping existing Python listener on port $Port (PID $pid) so the updated backend can reuse that port." -ForegroundColor Yellow
+    Stop-Process -Id $pid -Force -ErrorAction Stop
+    Start-Sleep -Milliseconds 800
+    return (Test-PortFree $Port)
+  } catch {
+    return $false
+  }
+}
+
 $requestedPort = 8000
 if ($env:PORT) {
   try { $requestedPort = [int]$env:PORT } catch { $requestedPort = 8000 }
+}
+
+$reusedRequestedPort = $false
+if (-not (Test-PortFree $requestedPort)) {
+  $reusedRequestedPort = Stop-PythonListenerIfSafe $requestedPort
 }
 
 $port = $null
@@ -83,7 +122,12 @@ if ($port -ne $requestedPort) {
 
 Push-Location $PSScriptRoot
 try {
-  python -m uvicorn app.main:app --host 0.0.0.0 --port $port
+  Write-Host "Starting backend on http://127.0.0.1:$port (reload enabled for local changes)." -ForegroundColor Green
+  if ($reusedRequestedPort) {
+    Write-Host "Reused port $requestedPort after stopping an older Python backend process." -ForegroundColor Green
+  }
+  $env:PORT = [string]$port
+  python -m uvicorn app.main:app --host 0.0.0.0 --port $port --reload
 } finally {
   Pop-Location
 }

@@ -11,9 +11,14 @@ def _backend_dir() -> Path:
 
 
 def _default_sqlite_db_url() -> str:
+    render_disk = os.getenv("RENDER_DISK_PATH")
+    if render_disk:
+        db_path = Path(render_disk) / "aqi.db"
     # On Railway/Docker, writing into the image layer path can be restricted; prefer `/tmp`.
-    if os.getenv("RUNNING_IN_DOCKER") == "1":
+    elif os.getenv("RUNNING_IN_DOCKER") == "1":
         db_path = Path("/tmp/aqi.db")
+    elif os.getenv("PYTEST_CURRENT_TEST") is not None:
+        db_path = (_backend_dir() / "aqi_pytest.db").resolve()
     else:
         db_path = (_backend_dir() / "aqi.db").resolve()
     # SQLAlchemy expects forward slashes in SQLite file URLs on Windows.
@@ -29,6 +34,13 @@ def _default_delhi_boundary_geojson_path() -> str:
 
 def _default_delhi_wards_geojson_path() -> str:
     return str((_backend_dir() / "data" / "Delhi_Wards.geojson").resolve())
+
+
+def _default_india_districts_topojson_path() -> str:
+    preferred = Path.home() / "Downloads" / "india-districts-2019-734.json"
+    if preferred.exists():
+        return str(preferred.resolve())
+    return str((_backend_dir() / "data" / "india-districts-2019-734.json").resolve())
 
 
 class Settings(BaseSettings):
@@ -85,6 +97,8 @@ class Settings(BaseSettings):
     # Global kill-switch for all network calls (CPCB API, Open-Meteo, NASA, Nominatim).
     # Useful for safe offline demos.
     external_apis_enabled: bool = Field(default=True, validation_alias=AliasChoices("EXTERNAL_APIS_ENABLED"))
+    # When enabled, "live" workflows should fail loudly instead of silently falling back to demo/file data.
+    live_data_strict: bool = Field(default=False, validation_alias=AliasChoices("LIVE_DATA_STRICT"))
 
     citizen_rate_limit_per_minute: int = 120
     gov_jwt_secret: str = "change-me"
@@ -95,6 +109,8 @@ class Settings(BaseSettings):
     cache_ttl_forecast_sec: int = 180
     cache_ttl_explain_sec: int = 120
     cache_ttl_disaster_sec: int = 30
+    pipeline_interval_minutes: int = Field(default=5, validation_alias=AliasChoices("PIPELINE_INTERVAL_MINUTES"))
+    cpcb_db_cache_max_age_hours: int = Field(default=2, validation_alias=AliasChoices("CPCB_DB_CACHE_MAX_AGE_HOURS"))
 
     # Pipeline behavior switches
     spatial_method: str = Field(default="idw", validation_alias=AliasChoices("SPATIAL_METHOD"))
@@ -103,11 +119,24 @@ class Settings(BaseSettings):
     idw_power: float = Field(default=2.0, validation_alias=AliasChoices("IDW_POWER"))
     forecast_model: str = Field(default="auto", validation_alias=AliasChoices("FORECAST_MODEL"))
 
+    # Disaster engine thresholds
+    disaster_recalc_minutes: int = Field(default=15, validation_alias=AliasChoices("DISASTER_RECALC_MINUTES"))
+    disaster_fire_radius_km: float = Field(default=5.0, validation_alias=AliasChoices("DISASTER_FIRE_RADIUS_KM"))
+    disaster_pollution_spike_pct: float = Field(default=25.0, validation_alias=AliasChoices("DISASTER_POLLUTION_SPIKE_PCT"))
+    disaster_pollution_spike_aqi_delta: float = Field(default=35.0, validation_alias=AliasChoices("DISASTER_POLLUTION_SPIKE_AQI_DELTA"))
+    disaster_extreme_aqi_threshold: int = Field(default=300, validation_alias=AliasChoices("DISASTER_EXTREME_AQI_THRESHOLD"))
+    disaster_heatwave_temp_c: float = Field(default=40.0, validation_alias=AliasChoices("DISASTER_HEATWAVE_TEMP_C"))
+    disaster_industrial_hazard_aqi_threshold: int = Field(default=220, validation_alias=AliasChoices("DISASTER_INDUSTRIAL_HAZARD_AQI_THRESHOLD"))
+
     # Optional GeoJSON overlays (for offline/demo use)
     delhi_boundary_geojson_path: str = Field(default_factory=_default_delhi_boundary_geojson_path)
     delhi_wards_geojson_path: str = Field(
         default_factory=_default_delhi_wards_geojson_path,
         validation_alias=AliasChoices("DELHI_WARDS_GEOJSON_PATH"),
+    )
+    india_districts_topojson_path: str = Field(
+        default_factory=_default_india_districts_topojson_path,
+        validation_alias=AliasChoices("INDIA_DISTRICTS_TOPOJSON_PATH"),
     )
 
 

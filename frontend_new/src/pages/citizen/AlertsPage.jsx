@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { useAlertsFeed, useAqiForecast, useEnvironmentUnified, useGeolocation, useLocationInsights, useWardAqi, useWardMap } from "../../hooks/index.js";
-import { Badge, SectionHeader, Skeleton } from "../../components/ui/index.jsx";
+import { useAlertsFeed, useAqiForecast, useAppLocation, useEnvironmentUnified, useLocationInsights, useStationsLive, useWardMap } from "../../hooks/index.js";
+import { ApiStatusStrip, Badge, SectionHeader, Skeleton } from "../../components/ui/index.jsx";
 import { AlertItem } from "../../features/alerts/AlertsPreview.jsx";
-import { safeNum } from "../../tokens/index.js";
+import { safeNum, safeStr } from "../../tokens/index.js";
 import Icon from "../../components/ui/Icon.jsx";
 
 function parseIsoDate(value) {
@@ -26,13 +26,14 @@ function formatRelativeTime(isoLike, now = new Date()) {
 }
 
 export default function AlertsPage() {
-  const geo = useGeolocation();
-  const insights = useLocationInsights(geo.lat, geo.lon);
-  const wardMap = useWardMap(geo.lat, geo.lon);
-  const wardId = insights?.data?.nearest_ward?.ward_id || wardMap?.data?.data?.[0]?.ward_id || null;
-  const nowAqi = useWardAqi(wardId);
-  const f2 = useAqiForecast(wardId, 2);
-  const env = useEnvironmentUnified(geo.lat, geo.lon, true);
+  const location = useAppLocation();
+  const insights = useLocationInsights(location.lat, location.lon);
+  const wardMap = useWardMap(location.lat, location.lon);
+  const nearestWard = insights?.data?.nearest_ward || wardMap?.data?.data?.[0] || null;
+  const wardId = nearestWard?.ward_id || null;
+  const stations = useStationsLive(location.lat, location.lon, 12, 8);
+  const env = useEnvironmentUnified(location.lat, location.lon, true);
+  const forecast3h = useAqiForecast(wardId, 3);
 
   const feed = useAlertsFeed();
   const feedItems = Array.isArray(feed.data?.data)
@@ -42,13 +43,13 @@ export default function AlertsPage() {
       : Array.isArray(feed.data)
         ? feed.data
         : [];
-  const nowVal = safeNum(nowAqi.data?.data?.aqi ?? nowAqi.data?.data?.aqi_value ?? nowAqi.data?.data?.value, 0);
-  const pred2 = safeNum(f2.data?.data?.aqi_pred, 0);
+
+  const nearestStation = stations.data?.data?.[0] || null;
+  const nowVal = nearestStation?.aqi != null ? safeNum(nearestStation?.aqi, 0) : safeNum(nearestWard?.aqi, 0);
+  const forecastVal = safeNum(forecast3h.data?.data?.aqi_pred, null);
   const wind = safeNum(env.data?.data?.weather?.wind_speed, null);
   const metCause = wind != null && wind < 10 ? "Low wind conditions" : "Unfavorable dispersion";
-  const cause = metCause;
   const isDisaster = nowVal > 300;
-  const crosses250 = pred2 >= 250;
 
   const [tick, setTick] = useState(0);
   useEffect(() => {
@@ -70,30 +71,44 @@ export default function AlertsPage() {
         sev: "critical",
         ward_id: zone,
         title: "DISASTER MODE",
-        event: "AQI above 300 detected",
+        event: "Live AQI above 300 detected",
         time_utc: isoNow,
         aqi: nowVal,
-        action: "Action required: restrict outdoor activity",
+        action: "Restrict outdoor activity immediately",
         active: true,
-        cause: "Smog",
+        cause: safeStr(env.data?.data?.pollution?.source_detection?.primary?.label, metCause),
       });
     }
-    if (crosses250) {
+    if (nearestStation && nowVal > 200 && !isDisaster) {
       out.push({
-        id: "system-forecast",
+        id: "system-high-live",
         sev: "high",
         ward_id: zone,
-        title: "EARLY WARNING",
-        event: "Forecast: may cross 250 (+2h)",
+        title: "LIVE STATION ALERT",
+        event: `${nearestStation.station_name} is reporting unhealthy AQI`,
         time_utc: isoNow,
-        aqi: pred2,
-        action: "Action required: Issue advisory",
+        aqi: nowVal,
+        action: "Reduce prolonged outdoor exposure",
         active: true,
-        cause: metCause,
+        cause: safeStr(env.data?.data?.pollution?.source_detection?.primary?.label, metCause),
+      });
+    }
+    if (Number.isFinite(forecastVal) && forecastVal > 300) {
+      out.push({
+        id: "system-forecast-3h",
+        sev: "high",
+        ward_id: zone,
+        title: "FORECAST ALERT",
+        event: `AQI may cross severe range within 3 hours`,
+        time_utc: isoNow,
+        aqi: forecastVal,
+        action: "Prepare masks, reduce outdoor exposure, and monitor updates",
+        active: true,
+        cause: `3h forecast ${forecastVal}`,
       });
     }
     return out;
-  }, [wardId, isDisaster, crosses250, nowVal, pred2, metCause]);
+  }, [wardId, isDisaster, nowVal, nearestStation, env.data, metCause, forecastVal]);
 
   const allItems = useMemo(() => {
     const merged = [...pinned, ...(Array.isArray(feedItems) ? feedItems : [])];
@@ -130,22 +145,29 @@ export default function AlertsPage() {
         }
       />
 
-      {false ? (
-        <div className="card card-elevated" style={{ padding: 16 }}>
-          <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
-            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-              <Icon name="triangle" size={18} color="var(--color-warning)" />
-              <div style={{ fontWeight: 850 }}>AQI expected to cross 250 in next 2 hours</div>
-            </div>
-            <div className="tag">Zone {wardId ? wardId.replace("DEL_WARD_", "Z") : "—"}</div>
-          </div>
-          <div className="muted" style={{ marginTop: 8, lineHeight: 1.6 }}>
-            Cause: {cause}. Forecast: <b style={{ color: "var(--text-primary)" }}>{pred2}</b> AQI at +2h.
-          </div>
-        </div>
-      ) : null}
+      <ApiStatusStrip envData={env.data} stationsData={stations.data} />
 
-      {feed.loading ? (
+      <div className="card card-elevated" style={{ padding: 16 }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <Icon name="mapPin" size={18} color="var(--accent)" />
+            <div style={{ fontWeight: 850 }}>Primary live source</div>
+          </div>
+          <div className="tag">{nearestStation ? `${safeNum(nearestStation.distance_km, 0)} km` : "—"}</div>
+        </div>
+        <div className="muted" style={{ marginTop: 8, lineHeight: 1.6 }}>
+          {nearestStation
+            ? `${nearestStation.station_name} is the nearest live CPCB station. Current AQI: ${nowVal}.`
+            : nearestWard
+              ? `${safeStr(nearestWard.ward_name, wardId || "Selected ward")} is being used as the current ward estimate. AQI: ${nowVal}.`
+              : "No live CPCB station is resolved yet."}
+        </div>
+        <div className="muted" style={{ marginTop: 6 }}>
+          {Number.isFinite(forecastVal) ? `3-hour forecast is active: AQI ${forecastVal}.` : "Forecast will appear once the backend has a recent ward snapshot."}
+        </div>
+      </div>
+
+      {feed.loading || stations.loading ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <Skeleton height="74px" />
           <Skeleton height="74px" />

@@ -1,21 +1,35 @@
 services:
   - type: web
-    name: aqi-backend
-    env: python
-    buildCommand: pip install -r backend/requirements.txt
-    startCommand: cd backend && python -m app.entrypoint
+    name: hyperlocal-aqi
+    env: docker
     healthCheckPath: /v1/health
+    disk:
+      name: aqi-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.9"
+      - key: RENDER_DISK_PATH
+        value: "/var/data"
       # Keep external integrations on (CPCB/Open-Meteo/Nominatim/FIRMS) unless you want offline demos.
       - key: EXTERNAL_APIS_ENABLED
         value: "true"
+      - key: ENABLE_EXTENDED_INGESTION
+        value: "true"
       # Recommended for Render: avoid duplicate background schedulers if multiple instances run.
       - key: ENABLE_SCHEDULER
+        value: "false"
+      - key: ENABLE_XGBOOST_FORECASTING
+        value: "true"
+      - key: FORECAST_MODEL
+        value: "auto"
+      - key: LIVE_DATA_STRICT
         value: "false"
       # Secrets (set these in Render dashboard when prompted)
       - key: FIRMS_MAP_KEY
         sync: false
       - key: CPCB_API_KEY
+        sync: false
+      - key: NASA_API_KEY
         sync: false

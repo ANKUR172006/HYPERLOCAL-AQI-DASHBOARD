@@ -1,21 +1,14 @@
 import { useMemo } from "react";
 import {
+  useAppLocation,
   useEnvironmentUnified,
-  useForecast,
-  useGeolocation,
   useLocationInsights,
-  useWardAqi,
+  useStationsLive,
   useWardMap,
 } from "../../hooks/index.js";
 import { aqiTone, safeNum, safeStr } from "../../tokens/index.js";
 import Icon from "../../components/ui/Icon.jsx";
-import { Badge, SectionHeader, Skeleton } from "../../components/ui/index.jsx";
-
-function arrow(delta) {
-  if (delta > 4) return { icon: "arrowUp", label: "Rising" };
-  if (delta < -4) return { icon: "arrowDown", label: "Falling" };
-  return { icon: "minus", label: "Steady" };
-}
+import { ApiStatusStrip, Badge, SectionHeader, Skeleton } from "../../components/ui/index.jsx";
 
 function advisoryForAqi(aqi) {
   const n = safeNum(aqi, 0);
@@ -44,48 +37,55 @@ function formatPop(n) {
 }
 
 export default function HomePage({ onNavigate }) {
-  const geo = useGeolocation();
-  const insights = useLocationInsights(geo.lat, geo.lon);
-  const wardMap = useWardMap(geo.lat, geo.lon);
-  const env = useEnvironmentUnified(geo.lat, geo.lon, true);
+  const location = useAppLocation();
+  const insights = useLocationInsights(location.lat, location.lon);
+  const wardMap = useWardMap(location.lat, location.lon);
+  const env = useEnvironmentUnified(location.lat, location.lon, true);
+  const stations = useStationsLive(location.lat, location.lon, 70, 8);
 
   const nearestWardId = insights?.data?.nearest_ward?.ward_id || wardMap?.data?.data?.[0]?.ward_id || null;
-  const wardAqi = useWardAqi(nearestWardId);
-  const forecast = useForecast(nearestWardId);
+  const nearestWard = insights?.data?.nearest_ward || wardMap?.data?.data?.[0] || null;
+  const nearestStation = stations.data?.data?.[0] || null;
+  const stationFreshness = safeStr(stations.data?.freshness, nearestStation ? "live" : "");
+  const stationAgeMinutes = safeNum(stations.data?.age_minutes, null);
 
-  const aqiVal = safeNum(wardAqi.data?.data?.aqi ?? wardAqi.data?.data?.aqi_value ?? wardAqi.data?.data?.value, 0);
+  const aqiVal = nearestStation?.aqi != null ? safeNum(nearestStation?.aqi, 0) : safeNum(nearestWard?.aqi, null);
   const tone = useMemo(() => aqiTone(aqiVal), [aqiVal]);
-  const forecastVal = safeNum(forecast.data?.data?.aqi_pred ?? forecast.data?.data?.aqi ?? forecast.data?.aqi_pred, 0);
-  const delta = forecastVal ? forecastVal - aqiVal : 0;
-  const dir = arrow(delta);
 
   const weather = env.data?.data?.weather || {};
-  const locationLabel = safeStr(env.data?.data?.location?.locality, safeStr(env.data?.data?.location?.city, "Central Delhi"));
+  const region = insights?.data?.region || wardMap?.data?.region || null;
+  const locationLabel = safeStr(
+    env.data?.data?.location?.locality,
+    safeStr(
+      env.data?.data?.location?.city,
+      [safeStr(region?.city, ""), safeStr(region?.district, ""), safeStr(region?.state, "")].filter(Boolean).join(", ") || "Current location",
+    ),
+  );
   const primaryPollutant = safeStr(
-    wardAqi.data?.data?.primary_pollutant,
-    safeStr(wardMap.data?.data?.[0]?.primary_pollutant, "PM2.5"),
+    nearestStation?.dominant_pollutant,
+    safeStr(env.data?.data?.pollution?.station_name ? "station mix" : nearestWard?.primary_pollutant, "PM2.5"),
   );
 
   const advisory = useMemo(() => advisoryForAqi(aqiVal), [aqiVal]);
   const risk = useMemo(() => riskFromAqi(aqiVal), [aqiVal]);
 
   const affectedPopulation = useMemo(() => {
-    const base = 800_000;
-    const n = safeNum(aqiVal, 0);
-    const factor = n > 300 ? 1.8 : n > 200 ? 1.5 : n > 100 ? 1.2 : 0.9;
-    return Math.round(base * factor);
-  }, [aqiVal]);
+    const realPop = nearestWard?.disaster_assessment?.affected_population;
+    if (realPop && realPop > 0) return realPop;
+    const base = safeNum(insights?.data?.nearest_ward?.population, 50000);
+    return base > 0 ? base : null;
+  }, [nearestWard, insights?.data]);
 
-  const det = wardAqi.data?.data?.source_detection || {};
+  const det = env.data?.data?.pollution?.source_detection || {};
   const detectionPrimary = det?.primary || null;
   const detectionSecondary = det?.secondary || null;
   const detectionReasons = Array.isArray(det?.reasons) ? det.reasons : [];
-  const confidence = Number.isFinite(detectionPrimary?.confidence) ? detectionPrimary.confidence : 64;
+  const confidence = Number.isFinite(detectionPrimary?.confidence) ? detectionPrimary.confidence : null;
   const firesPayload = env.data?.data?.fires || {};
   const fires = Array.isArray(firesPayload?.fires) ? firesPayload.fires : [];
   const fireNearby = Boolean(firesPayload?.fireNearby ?? det?.fireNearby);
   const satellite = env.data?.data?.satellite || {};
-  const satSource = safeStr(satellite?.source, "—");
+  const satSource = safeStr(satellite?.source, "-");
   const satMeta = satellite?.metadata || {};
   const satHotspots = safeNum(satMeta?.hotspot_count, fires.length);
 
@@ -99,8 +99,8 @@ export default function HomePage({ onNavigate }) {
               {locationLabel}
             </div>
             <Badge tone="info">
-              <Icon name={geo.mode === "device" ? "eye" : "flag"} size={14} />
-              {geo.mode === "device" ? "Device" : "Demo"}
+              <Icon name={location.mode === "search" ? "search" : location.mode === "device" ? "eye" : "flag"} size={14} />
+              {location.mode === "search" ? "Searched" : location.mode === "device" ? "Device" : "Default"}
             </Badge>
           </div>
           <div style={{ color: "var(--text-muted)", fontSize: "0.875rem" }}>
@@ -116,12 +116,19 @@ export default function HomePage({ onNavigate }) {
                 <Icon name={tone.icon} size={16} color={tone.color} />
                 {tone.label}
               </span>
+              <Badge tone={nearestStation ? "success" : nearestWard ? "info" : "warning"}>
+                {nearestStation ? (stationFreshness === "stale" ? "CPCB cache" : "Live CPCB station") : nearestWard ? "Virtual ward AQI" : "Awaiting live station"}
+              </Badge>
               <span style={{ color: "var(--text-secondary)", fontSize: "0.9375rem" }}>
                 Dominant: <b style={{ color: "var(--text-primary)" }}>{primaryPollutant}</b>
               </span>
             </div>
             <div style={{ marginTop: 10, color: "var(--text-secondary)" }}>
-              {tone.description}
+              {nearestStation
+                ? `${tone.description} Nearest station: ${safeStr(nearestStation.station_name, "Unknown station")} (${safeNum(nearestStation.distance_km, 0)} km).`
+                : nearestWard
+                  ? `${tone.description} Virtual ward: ${safeStr(nearestWard.ward_name, nearestWard.ward_id)}.`
+                  : tone.description}
             </div>
           </div>
 
@@ -137,17 +144,25 @@ export default function HomePage({ onNavigate }) {
               </div>
             </div>
             <div className="mini">
-              <div className="mini-k">Forecast (3h)</div>
-              {forecast.loading ? <Skeleton height="20px" width="90px" /> : (
+              <div className="mini-k">Primary source</div>
+              {stations.loading ? <Skeleton height="20px" width="120px" /> : nearestStation ? (
                 <div className="mini-v">
-                  <span style={{ color: aqiTone(forecastVal).color, fontWeight: 750, fontFamily: "var(--font-mono)" }}>{forecastVal || "-"}</span>
-                  <span className="mini-d">
-                    <Icon name={dir.icon} size={14} />
-                    {dir.label}
-                  </span>
+                  <span style={{ color: tone.color, fontWeight: 750, fontFamily: "var(--font-mono)" }}>{safeNum(nearestStation?.distance_km, 0)} km</span>
+                  <span className="mini-d"><Icon name="mapPin" size={14} />{stationFreshness === "stale" ? "Cached" : "Live"}</span>
+                </div>
+              ) : (
+                <div className="mini-v">
+                  <span style={{ color: tone.color, fontWeight: 750, fontFamily: "var(--font-mono)" }}>{safeNum(nearestWard?.aqi, 0)}</span>
+                  <span className="mini-d"><Icon name="layers" size={14} />Virtual ward</span>
                 </div>
               )}
-              <div className="mini-s">{safeStr(forecast.data?.data?.category, "")}</div>
+              <div className="mini-s">
+                {nearestStation
+                  ? `${safeStr(nearestStation?.station_name, "Unknown station")}${Number.isFinite(stationAgeMinutes) ? ` · ${stationAgeMinutes} min old` : ""}`
+                  : nearestWard
+                    ? `Using ${safeStr(nearestWard.ward_name, nearestWard.ward_id)} virtual ward estimate`
+                    : "No live CPCB station resolved yet"}
+              </div>
             </div>
             <div className="mini">
               <div className="mini-k">Wind</div>
@@ -169,6 +184,8 @@ export default function HomePage({ onNavigate }) {
         </div>
       </div>
 
+      <ApiStatusStrip envData={env.data} stationsData={stations.data} />
+
       <div className="card card-elevated" style={{ padding: 16 }}>
         <SectionHeader title="Quick actions" right={<Badge tone="info">Simple view</Badge>} />
         <div className="muted" style={{ marginTop: 2 }}>
@@ -185,8 +202,11 @@ export default function HomePage({ onNavigate }) {
 
       <div className="grid-2">
         <div className="card card-elevated">
-          <SectionHeader title="Cause preview" right={<Badge tone="info">{confidence}%</Badge>} />
+          <SectionHeader title="Cause preview" right={<Badge tone="info">{confidence != null ? `${confidence}%` : "Live"}</Badge>} />
           <div style={{ padding: 16 }}>
+            <div className="muted" style={{ marginBottom: 8 }}>
+              Based on live station pollutants + weather near {locationLabel}.
+            </div>
             <div style={{ fontSize: "1rem", fontWeight: 900, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
               <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
                 <Icon name={detectionPrimary?.icon || "info"} size={16} />
@@ -236,13 +256,13 @@ export default function HomePage({ onNavigate }) {
               <Icon name={satSource.toLowerCase().includes("firms") ? "flame" : "satellite"} size={16} />
               <span style={{ fontFamily: "var(--font-mono)", fontWeight: 700 }}>{satSource}</span>
             </div>
-            <div className="mini-s">{safeStr(satMeta?.note, "—")}</div>
+            <div className="mini-s">{safeStr(satMeta?.note, "-")}</div>
           </div>
           <div className="mini">
             <div className="mini-k">Hotspots</div>
             <div className="mini-v">
               <span style={{ fontFamily: "var(--font-mono)", fontWeight: 750 }}>{Number.isFinite(satHotspots) ? satHotspots : fires.length}</span>
-              <span className="mini-d">last {1} day</span>
+              <span className="mini-d">last 1 day</span>
             </div>
             <div className="mini-s">{fireNearby ? "Biomass burning likely" : "No hotspot within radius"}</div>
           </div>
@@ -252,7 +272,7 @@ export default function HomePage({ onNavigate }) {
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 8 }}>
                 {fires.slice(0, 4).map((f, idx) => (
                   <span key={idx} className="tag" style={{ fontFamily: "var(--font-mono)" }}>
-                    {safeNum(f?.lat, 0).toFixed(4)}, {safeNum(f?.lon, 0).toFixed(4)} · {safeStr(f?.confidence, "—")}
+                    {safeNum(f?.lat, 0).toFixed(4)}, {safeNum(f?.lon, 0).toFixed(4)} · {safeStr(f?.confidence, "-")}
                   </span>
                 ))}
               </div>

@@ -1,4 +1,5 @@
 import Icon from "./Icon.jsx";
+export { default as ApiStatusStrip } from "./ApiStatusStrip.jsx";
 
 export function Skeleton({ width = "100%", height = "12px", style = {} }) {
   return (

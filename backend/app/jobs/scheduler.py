@@ -29,8 +29,8 @@ def start_scheduler() -> None:
     scheduler.add_job(
         _job_run_pipeline,
         trigger="interval",
-        minutes=5,
-        id="pipeline_every_5m",
+        minutes=max(1, int(settings.pipeline_interval_minutes)),
+        id="pipeline_interval_job",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

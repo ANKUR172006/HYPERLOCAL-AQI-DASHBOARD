@@ -28,6 +28,7 @@ from app.models.entities import (
     Ward,
 )
 from app.services.cpcb_source import CpcbSource, StationObservation
+from app.services.disaster_engine import DisasterEngineService
 from app.services.environmental_ingestion_service import EnvironmentalIngestionService
 from app.services.processing.environmental_processing import align_to_hour
 
@@ -83,6 +84,86 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     dlambda = math.radians(lon2 - lon1)
     a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
     return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _station_aqi_from_observation(station: StationObservation) -> int:
+    if getattr(station, "official_aqi", None) is not None:
+        return int(max(0, min(500, round(float(station.official_aqi)))))
+    pollutant_indices = {
+        "PM2.5": calc_sub_index(float(station.pm25), "pm25"),
+        "PM10": calc_sub_index(float(station.pm10), "pm10"),
+        "NO2": calc_sub_index(float(station.no2), "no2"),
+        "SO2": calc_sub_index(float(station.so2), "so2"),
+        "O3": calc_sub_index(float(station.o3), "o3"),
+        "CO": calc_sub_index(float(station.co), "co"),
+    }
+    primary = max(pollutant_indices, key=pollutant_indices.get)
+    return int(pollutant_indices[primary])
+
+
+def _select_station_items(
+    target_lat: float,
+    target_lon: float,
+    stations: list[StationObservation],
+    limit: int = 5,
+    radius_km: float | None = None,
+) -> list[tuple[float, StationObservation]]:
+    radius = float(radius_km if radius_km is not None else (getattr(settings, "idw_radius_km", 0.0) or 0.0))
+    items: list[tuple[float, StationObservation]] = []
+    for station in stations:
+        dist = _haversine_km(target_lat, target_lon, station.latitude, station.longitude)
+        if radius > 0 and dist > radius:
+            continue
+        items.append((dist, station))
+    items.sort(key=lambda x: x[0])
+    return items[: max(1, limit)]
+
+
+def _weighted_station_aqi(target_lat: float, target_lon: float, stations: list[StationObservation]) -> float | None:
+    items = _select_station_items(target_lat, target_lon, stations, limit=4, radius_km=25.0)
+    if not items:
+        return None
+    if items[0][0] <= 1e-6:
+        return float(_station_aqi_from_observation(items[0][1]))
+    power = max(3.0, float(getattr(settings, "idw_power", 2.0) or 2.0))
+    weighted_sum = 0.0
+    total_weight = 0.0
+    for dist, station in items:
+        weight = 1.0 / ((max(dist, 0.05) ** power) + 0.0001)
+        weighted_sum += weight * _station_aqi_from_observation(station)
+        total_weight += weight
+    return (weighted_sum / total_weight) if total_weight else None
+
+
+def _stabilize_aqi_against_stations(
+    estimated_aqi: int,
+    nearest_station_aqi: float | None,
+    weighted_station_aqi: float | None,
+    nearest_station_distance_km: float | None,
+) -> int:
+    estimated = int(max(0, min(500, estimated_aqi)))
+    if nearest_station_aqi is None:
+        return estimated
+    nearest = float(nearest_station_aqi)
+    weighted = float(weighted_station_aqi if weighted_station_aqi is not None else nearest)
+    nearest_dist = float(nearest_station_distance_km if nearest_station_distance_km is not None else 999.0)
+
+    if nearest_dist <= 1.2:
+        return int(round(nearest))
+
+    if nearest_dist <= 3:
+        slack = 12
+        blended = round((nearest * 0.82) + (weighted * 0.15) + (estimated * 0.03))
+    elif nearest_dist <= 8:
+        slack = 18
+        blended = round((nearest * 0.70) + (weighted * 0.22) + (estimated * 0.08))
+    else:
+        slack = 25
+        blended = round((nearest * 0.58) + (weighted * 0.30) + (estimated * 0.12))
+
+    lower = max(0, math.floor(min(nearest, weighted) - slack))
+    upper = min(500, math.ceil(max(nearest, weighted) + slack))
+    return int(max(lower, min(upper, blended)))
 
 
 def _build_ward_centroids() -> dict[str, tuple[float, float]]:
@@ -167,6 +248,9 @@ class WardObservation:
     humidity: float
     temperature: float
     source: str
+    nearest_station_aqi: float | None = None
+    weighted_station_aqi: float | None = None
+    nearest_station_distance_km: float | None = None
 
 
 class PipelineService:
@@ -272,6 +356,12 @@ class PipelineService:
         snapshots = self.compute_aqi(ts_slot, interpolated)
         self.forecast(ts_slot, interpolated, snapshots)
         crisis = self.detect_crises(ts_slot, interpolated, snapshots)
+        DisasterEngineService(self.db).assess_city(
+            ts_slot=ts_slot,
+            wards=wards,
+            rows_by_ward={row.ward_id: row for row in interpolated},
+            snapshots=snapshots,
+        )
         self._early_warning_layer(crisis)
         in_pytest = os.getenv("PYTEST_CURRENT_TEST") is not None
         if settings.enable_extended_ingestion and settings.external_apis_enabled and stations and not in_pytest:
@@ -603,8 +693,13 @@ class PipelineService:
 
         if mode in {"xgb", "xgboost"} or (mode == "auto" and settings.enable_xgboost_forecasting):
             model_name = "xgboost"
-            model_version = "xgb-h-v3"
+            model_version = "xgb-h-v4"
             predictions = self._xgboost_predict(rows, snapshots)
+
+        if predictions is None and model_name == "xgboost":
+            model_name = "momentum-fallback"
+            model_version = "fallback-v2"
+            predictions = self._momentum_fallback(rows)
 
         if predictions is None and mode in {"seasonal_naive"}:
             model_name = "seasonal-naive"
@@ -624,6 +719,30 @@ class PipelineService:
 
         if predictions is None:
             predictions = {s.ward_id: {1: int(s.aqi_value), 2: int(s.aqi_value), 3: int(s.aqi_value)} for s in snapshots}
+        else:
+            momentum_reference = self._momentum_fallback(rows)
+            baseline_by_ward = {s.ward_id: int(s.aqi_value) for s in snapshots}
+            stabilized: dict[str, dict[int, int]] = {}
+            for ward_id, horizon_map in predictions.items():
+                baseline = int(baseline_by_ward.get(ward_id, 0))
+                stabilized[ward_id] = {}
+                for horizon, pred in horizon_map.items():
+                    raw_pred = int(round(float(pred)))
+                    if model_name == "xgboost":
+                        momentum_pred = int(momentum_reference.get(ward_id, {}).get(int(horizon), raw_pred))
+                        blended = int(round((0.45 * raw_pred) + (0.55 * momentum_pred)))
+                    else:
+                        blended = raw_pred
+                    max_delta = 28 * int(horizon)
+                    lower = max(0, baseline - max_delta)
+                    upper = min(500, baseline + max_delta)
+                    stabilized_value = max(lower, min(upper, blended))
+                    prev_horizon = stabilized[ward_id].get(int(horizon) - 1, baseline)
+                    step_limit = 22
+                    step_lower = max(0, prev_horizon - step_limit)
+                    step_upper = min(500, prev_horizon + step_limit)
+                    stabilized[ward_id][int(horizon)] = max(step_lower, min(step_upper, stabilized_value))
+            predictions = stabilized
 
         ward_ids = list(predictions.keys())
         existing = self.db.scalars(
@@ -688,9 +807,17 @@ class PipelineService:
 
         # If live CPCB fetch fails (timeouts / intermittent outages), avoid generating unstable random data.
         # Prefer a "stale but real" fallback from the DB, then the bundled sample file, and only then synthetic.
-        db_cached = self._load_recent_station_cache(max_age_hours=6, max_stations=30)
+        db_cached = self._load_recent_station_cache(
+            max_age_hours=max(1, int(settings.cpcb_db_cache_max_age_hours)),
+            max_stations=30,
+            require_live_api=bool(settings.live_data_strict),
+        )
         if db_cached:
             return db_cached
+
+        if settings.live_data_strict and (settings.cpcb_source_mode or "").strip().lower() in {"api", "hybrid"}:
+            logger.warning("Live strict mode enabled and CPCB API unavailable; refusing file/synthetic fallback rows")
+            return []
 
         if (settings.cpcb_source_mode or "").strip().lower() in {"api", "hybrid"} and settings.cpcb_file_path:
             file_source = CpcbSource(
@@ -705,7 +832,12 @@ class PipelineService:
 
         return self._synthetic_cpcb_fallback()
 
-    def _load_recent_station_cache(self, max_age_hours: int = 6, max_stations: int = 30) -> list[StationObservation]:
+    def _load_recent_station_cache(
+        self,
+        max_age_hours: int = 6,
+        max_stations: int = 30,
+        require_live_api: bool = False,
+    ) -> list[StationObservation]:
         """
         "Stale but real" fallback when live CPCB fetch fails.
 
@@ -778,7 +910,7 @@ class PipelineService:
         # after transient outages. If we don't have enough "api-ish" stations, fall back to any accepted rows.
         prefer_api = self.db.execute(base_stmt.where(CleanMeasurement.source.like("%api%"))).all()
         by_station = _collect(prefer_api)
-        if len(by_station) < max(3, min(max_stations, 8)):
+        if not require_live_api and len(by_station) < max(3, min(max_stations, 8)):
             all_rows = self.db.execute(base_stmt).all()
             by_station = _collect(all_rows)
 
@@ -920,6 +1052,15 @@ class PipelineService:
             nearest_n = best_n
             logger.info("IDW CV selected power=%s nearest_n=%s rmse_pm25=%s", idw_power, nearest_n, round(best_rmse, 3))
 
+        # Clamp IDW output to observed station range — prevents interpolation from
+        # producing values higher than any real station (avoids false "Severe" upgrades).
+        max_pm25 = max((s.pm25 for s in rows), default=500.0)
+        max_pm10 = max((s.pm10 for s in rows), default=500.0)
+        max_no2  = max((s.no2  for s in rows), default=500.0)
+        max_so2  = max((s.so2  for s in rows), default=500.0)
+        max_o3   = max((s.o3   for s in rows), default=500.0)
+        max_co   = max((s.co   for s in rows), default=50.0)
+
         observations: list[WardObservation] = []
         for ward in wards:
             if ward.centroid_lat is not None and ward.centroid_lon is not None:
@@ -931,20 +1072,27 @@ class PipelineService:
                     lat, lon = WARD_CENTROIDS.get(ward.ward_id, (28.6139, 77.2090))
                 else:
                     continue
+            nearest_items = _select_station_items(lat, lon, rows, limit=5, radius_km=25.0)
+            nearest_station_distance_km = float(nearest_items[0][0]) if nearest_items else None
+            nearest_station_aqi = float(_station_aqi_from_observation(nearest_items[0][1])) if nearest_items else None
+            weighted_station_aqi = _weighted_station_aqi(lat, lon, rows)
             observations.append(
                 WardObservation(
                     ward_id=ward.ward_id,
-                    pm25=_idw_value(lat, lon, "pm25", idw_power),
-                    pm10=_idw_value(lat, lon, "pm10", idw_power),
-                    no2=_idw_value(lat, lon, "no2", idw_power),
-                    so2=_idw_value(lat, lon, "so2", idw_power),
-                    o3=_idw_value(lat, lon, "o3", idw_power),
-                    co=_idw_value(lat, lon, "co", idw_power),
+                    pm25=min(_idw_value(lat, lon, "pm25", idw_power), max_pm25),
+                    pm10=min(_idw_value(lat, lon, "pm10", idw_power), max_pm10),
+                    no2=min(_idw_value(lat, lon, "no2",  idw_power), max_no2),
+                    so2=min(_idw_value(lat, lon, "so2",  idw_power), max_so2),
+                    o3=min(_idw_value(lat, lon, "o3",   idw_power), max_o3),
+                    co=min(_idw_value(lat, lon, "co",   idw_power), max_co),
                     wind_speed=_idw_value(lat, lon, "wind_speed", idw_power),
                     wind_direction=_idw_value(lat, lon, "wind_direction", idw_power),
                     humidity=_idw_value(lat, lon, "humidity", idw_power),
                     temperature=_idw_value(lat, lon, "temperature", idw_power),
                     source=rows[0].source,
+                    nearest_station_aqi=nearest_station_aqi,
+                    weighted_station_aqi=weighted_station_aqi,
+                    nearest_station_distance_km=nearest_station_distance_km,
                 )
             )
         return observations
@@ -961,7 +1109,13 @@ class PipelineService:
                 "CO": calc_sub_index(row.co, "co"),
             }
             primary_pollutant = max(pollutant_indices, key=pollutant_indices.get)
-            aqi_value = pollutant_indices[primary_pollutant]
+            estimated_aqi = pollutant_indices[primary_pollutant]
+            aqi_value = _stabilize_aqi_against_stations(
+                estimated_aqi=estimated_aqi,
+                nearest_station_aqi=row.nearest_station_aqi,
+                weighted_station_aqi=row.weighted_station_aqi,
+                nearest_station_distance_km=row.nearest_station_distance_km,
+            )
             total = sum(pollutant_indices.values()) or 1
             contribution = {key: round((value / total) * 100, 2) for key, value in pollutant_indices.items()}
             contribution["raw"] = {
@@ -972,6 +1126,10 @@ class PipelineService:
                 "o3": round(row.o3, 2),
                 "co": round(row.co, 2),
                 "source": row.source,
+                "estimated_aqi_pre_anchor": int(estimated_aqi),
+                "nearest_station_aqi": round(float(row.nearest_station_aqi), 2) if row.nearest_station_aqi is not None else None,
+                "weighted_station_aqi": round(float(row.weighted_station_aqi), 2) if row.weighted_station_aqi is not None else None,
+                "nearest_station_distance_km": round(float(row.nearest_station_distance_km), 2) if row.nearest_station_distance_km is not None else None,
             }
             quality_score = 0.93 if row.source.startswith("cpcb") else 0.72
             snapshot = AqiSnapshot(
@@ -1075,9 +1233,13 @@ class PipelineService:
 
         train_x: list[list[float]] = []
         train_y: dict[int, list[float]] = {1: [], 2: [], 3: []}
+        eligible_wards = 0
+        strongest_history = 0
         for ward_history in by_ward.values():
             if len(ward_history) < 8:
                 continue
+            eligible_wards += 1
+            strongest_history = max(strongest_history, len(ward_history))
             for idx in range(3, len(ward_history) - 3):
                 current = ward_history[idx]
                 lag1 = ward_history[idx - 1]
@@ -1115,56 +1277,20 @@ class PipelineService:
                 train_y[2].append(float(ward_history[idx + 2].aqi_value))
                 train_y[3].append(float(ward_history[idx + 3].aqi_value))
 
-        # Warm start with synthetic labels if history is still sparse.
-        if len(train_x) < 40 and rows:
-            rng = Random(42)
-            snap_by_ward = {s.ward_id: s for s in snapshots}
-            for _ in range(25):
-                for row in rows:
-                    current = snap_by_ward.get(row.ward_id)
-                    base = float(current.aqi_value if current else 120)
-                    momentum = (row.pm25 / 4 + row.pm10 / 10 + row.no2 / 6) / 10
-                    vec = [
-                        base,
-                        base - rng.uniform(2, 12),
-                        base - rng.uniform(4, 16),
-                        base - rng.uniform(6, 20),
-                        rng.uniform(-8, 8),
-                        rng.uniform(-8, 8),
-                        row.pm25,
-                        row.pm10,
-                        row.no2,
-                        row.so2,
-                        row.o3,
-                        row.co,
-                        row.wind_speed,
-                        row.wind_direction,
-                        row.humidity,
-                        row.temperature,
-                        0.0,
-                        1.0,
-                        0.0,
-                        1.0,
-                    ]
-                    train_x.append(vec)
-                    train_y[1].append(max(0.0, min(500.0, base + momentum + rng.uniform(-8, 8))))
-                    train_y[2].append(max(0.0, min(500.0, base + 2 * momentum + rng.uniform(-10, 10))))
-                    train_y[3].append(max(0.0, min(500.0, base + 3 * momentum + rng.uniform(-12, 12))))
-
-        if len(train_x) < 25:
+        if eligible_wards < 5 or strongest_history < 16 or len(train_x) < 120:
             return None
 
         models: dict[int, XGBRegressor] = {}
         for horizon in (1, 2, 3):
             model = XGBRegressor(
-                n_estimators=260,
-                max_depth=5,
-                learning_rate=0.05,
-                subsample=0.85,
-                colsample_bytree=0.85,
-                min_child_weight=2,
-                reg_alpha=0.1,
-                reg_lambda=1.2,
+                n_estimators=180,
+                max_depth=4,
+                learning_rate=0.04,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                min_child_weight=4,
+                reg_alpha=0.35,
+                reg_lambda=1.8,
                 objective="reg:squarederror",
                 random_state=42 + horizon,
                 n_jobs=1,

@@ -12,6 +12,31 @@ function causeFromPrimary(primaryPollutant) {
   return "Mixed sources";
 }
 
+function mixHex(a, b, t) {
+  const ah = a.replace("#", "");
+  const bh = b.replace("#", "");
+  const ar = parseInt(ah.slice(0, 2), 16);
+  const ag = parseInt(ah.slice(2, 4), 16);
+  const ab = parseInt(ah.slice(4, 6), 16);
+  const br = parseInt(bh.slice(0, 2), 16);
+  const bg = parseInt(bh.slice(2, 4), 16);
+  const bb = parseInt(bh.slice(4, 6), 16);
+  const r = Math.round(ar + (br - ar) * t);
+  const g = Math.round(ag + (bg - ag) * t);
+  const b2 = Math.round(ab + (bb - ab) * t);
+  return `rgb(${r}, ${g}, ${b2})`;
+}
+
+function heatColor(aqi) {
+  const n = Math.max(0, Math.min(500, Number(aqi) || 0));
+  if (n <= 50) return mixHex("#16a34a", "#84cc16", n / 50);
+  if (n <= 100) return mixHex("#84cc16", "#facc15", (n - 50) / 50);
+  if (n <= 150) return mixHex("#facc15", "#f59e0b", (n - 100) / 50);
+  if (n <= 200) return mixHex("#f59e0b", "#d97706", (n - 150) / 50);
+  if (n <= 300) return mixHex("#d97706", "#b45309", (n - 200) / 100);
+  return mixHex("#b45309", "#7c2d12", (n - 300) / 200);
+}
+
 function bboxFromGeoJSON(geo) {
   let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
   const push = (lon, lat) => {
@@ -64,7 +89,7 @@ function pathsFromGeoJSON(geo, project) {
   return out;
 }
 
-export default function WardGeoMap({ boundary, wardGeojson, wards, loading }) {
+export default function WardGeoMap({ boundary, wardGeojson, wards, loading, onSelect, selectedWardId = "", hotspots = [], legendLabel = "Zone map" }) {
   const [selected, setSelected] = useState(null);
   const [hoveredId, setHoveredId] = useState(null);
   const [hoverPos, setHoverPos] = useState({ x: 0, y: 0 });
@@ -116,6 +141,7 @@ export default function WardGeoMap({ boundary, wardGeojson, wards, loading }) {
 
   const maxAqi = useMemo(() => Math.max(1, ...rows.map((r) => (r.aqi == null ? 0 : r.aqi))), [rows]);
   const hovered = hoveredId ? byId[hoveredId] : null;
+  const currentSelected = selectedWardId ? (byId[selectedWardId] || selected) : selected;
 
   if (loading) {
     return (
@@ -190,9 +216,9 @@ export default function WardGeoMap({ boundary, wardGeojson, wards, loading }) {
               const isEstimated = Boolean(row?.estimated);
               const hasValue = aqi != null;
               const tone = aqi != null ? aqiTone(aqi) : null;
-              const isSel = selected?.ward_id === wardId;
+              const isSel = currentSelected?.ward_id === wardId;
               const isHover = hoveredId === wardId;
-              const intensity = aqi != null ? Math.max(0.16, Math.min(0.54, 0.16 + (aqi / 500) * 0.38)) : 0.12;
+              const intensity = aqi != null ? Math.max(0.18, Math.min(0.78, 0.18 + (aqi / 500) * 0.44)) : 0.12;
               const fillOpacity = hasValue ? (isHover ? Math.min(0.70, intensity + 0.14) : intensity) : 0.55;
               const baseStroke = isSel ? "rgba(2,6,23,0.55)" : isHover ? "rgba(2,6,23,0.42)" : "rgba(2,6,23,0.22)";
               return (
@@ -200,7 +226,7 @@ export default function WardGeoMap({ boundary, wardGeojson, wards, loading }) {
                   key={`w-${wardId}`}
                   d={p.d}
                   className={`ward-shape ${isSel ? "sel" : ""}`}
-                  fill={tone ? tone.bg : "url(#nodataHatch)"}
+                  fill={tone ? heatColor(aqi) : "url(#nodataHatch)"}
                   fillOpacity={fillOpacity}
                   stroke={baseStroke}
                   strokeDasharray={hasSnapshot ? "0" : isEstimated ? "4 3" : "6 4"}
@@ -209,9 +235,28 @@ export default function WardGeoMap({ boundary, wardGeojson, wards, loading }) {
                   onMouseEnter={() => setHoveredId(wardId)}
                   onClick={() => {
                     const next = row || { ward_id: wardId, ward_name: safeStr(p.props?.ward_name, wardId), aqi: 0, primary: "" };
-                    setSelected(isSel ? null : next);
+                    const value = isSel ? null : next;
+                    setSelected(value);
+                    onSelect?.(value);
                   }}
                 />
+              );
+            })}
+          </g>
+        )}
+
+        {!!hotspots.length && (
+          <g>
+            {hotspots.map((point, idx) => {
+              const lat = Number(point?.lat);
+              const lon = Number(point?.lon);
+              if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+              const [x, y] = project(lon, lat);
+              return (
+                <g key={`hotspot-${idx}`}>
+                  <circle cx={x} cy={y} r={9} fill="rgba(244,63,94,0.18)" />
+                  <circle cx={x} cy={y} r={4.2} fill="#fb7185" stroke="rgba(255,255,255,0.9)" strokeWidth="1.2" />
+                </g>
               );
             })}
           </g>
@@ -252,7 +297,7 @@ export default function WardGeoMap({ boundary, wardGeojson, wards, loading }) {
               const [x, y] = project(w.lon, w.lat);
               const tone = aqiTone(w.aqi);
               const r = 4 + (w.aqi / maxAqi) * 6;
-              const isSel = selected?.ward_id === w.ward_id;
+              const isSel = currentSelected?.ward_id === w.ward_id;
               return (
                 <g key={w.ward_id}>
                   <circle
@@ -264,7 +309,11 @@ export default function WardGeoMap({ boundary, wardGeojson, wards, loading }) {
                     stroke={isSel ? "#111" : "#fff"}
                     strokeWidth={isSel ? 2.5 : 1.5}
                     style={{ cursor: "pointer" }}
-                    onClick={() => setSelected(isSel ? null : w)}
+                    onClick={() => {
+                      const value = isSel ? null : w;
+                      setSelected(value);
+                      onSelect?.(value);
+                    }}
                   />
                 </g>
               );
@@ -279,7 +328,7 @@ export default function WardGeoMap({ boundary, wardGeojson, wards, loading }) {
             AQI intensity (low to high)
           </text>
           <text x={view.w - 24} y={36} fontSize="12" textAnchor="end" fill="var(--text-muted)" fontFamily="var(--font-sans)">
-            Delhi zones (prototype grid)
+            {legendLabel}
           </text>
         </g>
       </svg>
@@ -317,38 +366,38 @@ export default function WardGeoMap({ boundary, wardGeojson, wards, loading }) {
         </div>
       )}
 
-      {!!selected && (
+      {!!currentSelected && (
         <div className="map-pop">
           <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
             <div style={{ minWidth: 0 }}>
               <div className="muted" style={{ fontSize: "0.8125rem" }}>Selected zone</div>
               <div style={{ fontWeight: 750, fontSize: "1rem", lineHeight: 1.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {selected.ward_name || selected.ward_id}
+                {currentSelected.ward_name || currentSelected.ward_id}
               </div>
-              <div className="muted" style={{ fontSize: "0.8125rem" }}>{selected.ward_id}</div>
+              <div className="muted" style={{ fontSize: "0.8125rem" }}>{currentSelected.ward_id}</div>
             </div>
-            <button className="btn btn-xs" onClick={() => setSelected(null)} aria-label="Close">
+            <button className="btn btn-xs" onClick={() => { setSelected(null); onSelect?.(null); }} aria-label="Close">
               <Icon name="x" size={14} />
             </button>
           </div>
 
           <div className="map-pop-row">
-            {selected.aqi == null ? (
+            {currentSelected.aqi == null ? (
               <div className="tag"><Icon name="info" size={14} />No live snapshot</div>
             ) : (
-              <div className="pill" style={{ borderColor: `${aqiTone(selected.aqi).color}55`, background: aqiTone(selected.aqi).bg, color: aqiTone(selected.aqi).text }}>
-                <Icon name={aqiTone(selected.aqi).icon} size={14} color={aqiTone(selected.aqi).color} />
-                AQI {selected.aqi}
+              <div className="pill" style={{ borderColor: `${aqiTone(currentSelected.aqi).color}55`, background: aqiTone(currentSelected.aqi).bg, color: aqiTone(currentSelected.aqi).text }}>
+                <Icon name={aqiTone(currentSelected.aqi).icon} size={14} color={aqiTone(currentSelected.aqi).color} />
+                AQI {currentSelected.aqi}
               </div>
             )}
-            {selected.estimated && <div className="tag"><Icon name="wind" size={14} />Estimated (IDW)</div>}
-            <div className="muted">Dominant: <b style={{ color: "var(--text-primary)" }}>{selected.primary || "-"}</b></div>
+            {currentSelected.estimated && <div className="tag"><Icon name="wind" size={14} />Estimated (IDW)</div>}
+            <div className="muted">Dominant: <b style={{ color: "var(--text-primary)" }}>{currentSelected.primary || "-"}</b></div>
             <div className="muted">
               Cause:{" "}
               <b style={{ color: "var(--text-primary)" }}>
-                {selected.source_detection?.primary?.label
-                  ? `${selected.source_detection.primary.label}${Number.isFinite(selected.source_detection.primary.confidence) ? ` (${selected.source_detection.primary.confidence}%)` : ""}`
-                  : causeFromPrimary(selected.primary)}
+                {currentSelected.source_detection?.primary?.label
+                  ? `${currentSelected.source_detection.primary.label}${Number.isFinite(currentSelected.source_detection.primary.confidence) ? ` (${currentSelected.source_detection.primary.confidence}%)` : ""}`
+                  : causeFromPrimary(currentSelected.primary)}
               </b>
             </div>
           </div>

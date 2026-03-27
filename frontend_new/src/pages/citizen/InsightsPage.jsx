@@ -1,16 +1,15 @@
 import { useMemo } from "react";
 import {
+  useAppLocation,
   useEnvironmentUnified,
-  useForecast,
-  useGeolocation,
   useLocationInsights,
   usePollutants,
-  useWardAqi,
+  useStationsLive,
   useWardMap,
 } from "../../hooks/index.js";
 import { aqiTone, safeNum, safeStr } from "../../tokens/index.js";
 import Icon from "../../components/ui/Icon.jsx";
-import { Badge, SectionHeader, Skeleton } from "../../components/ui/index.jsx";
+import { ApiStatusStrip, Badge, SectionHeader, Skeleton } from "../../components/ui/index.jsx";
 
 function riskFromAqi(aqi) {
   const n = safeNum(aqi, 0);
@@ -22,30 +21,29 @@ function riskFromAqi(aqi) {
 }
 
 export default function InsightsPage({ onNavigate }) {
-  const geo = useGeolocation();
-  const insights = useLocationInsights(geo.lat, geo.lon);
-  const wardMap = useWardMap(geo.lat, geo.lon);
-  const env = useEnvironmentUnified(geo.lat, geo.lon, true);
+  const location = useAppLocation();
+  const insights = useLocationInsights(location.lat, location.lon);
+  const wardMap = useWardMap(location.lat, location.lon);
+  const env = useEnvironmentUnified(location.lat, location.lon, true);
+  const stations = useStationsLive(location.lat, location.lon, 12, 8);
 
   const nearestWardId = insights?.data?.nearest_ward?.ward_id || wardMap?.data?.data?.[0]?.ward_id || null;
-  const wardAqi = useWardAqi(nearestWardId);
-  const forecast = useForecast(nearestWardId);
+  const nearestWard = insights?.data?.nearest_ward || wardMap?.data?.data?.[0] || null;
   const breakdown = usePollutants(nearestWardId);
+  const nearestStation = stations.data?.data?.[0] || null;
 
-  const aqiVal = safeNum(wardAqi.data?.data?.aqi ?? wardAqi.data?.data?.aqi_value ?? wardAqi.data?.data?.value, 0);
+  const aqiVal = nearestStation?.aqi != null ? safeNum(nearestStation?.aqi, 0) : safeNum(nearestWard?.aqi, null);
   const tone = useMemo(() => aqiTone(aqiVal), [aqiVal]);
-  const forecastVal = safeNum(forecast.data?.data?.aqi_pred ?? forecast.data?.data?.aqi ?? forecast.data?.aqi_pred, 0);
-  const delta = forecastVal ? Math.round(forecastVal - aqiVal) : 0;
 
   const primaryPollutant = safeStr(
-    wardAqi.data?.data?.primary_pollutant,
-    safeStr(wardMap.data?.data?.[0]?.primary_pollutant, "PM2.5"),
+    nearestStation?.dominant_pollutant,
+    safeStr(nearestWard?.primary_pollutant, "PM2.5"),
   );
   const weather = env.data?.data?.weather || {};
   const sat = env.data?.data?.satellite || {};
   const risk = riskFromAqi(aqiVal);
 
-  const det = wardAqi.data?.data?.source_detection || {};
+  const det = env.data?.data?.pollution?.source_detection || {};
   const detectionPrimary = det?.primary || null;
   const detectionSecondary = det?.secondary || null;
   const detectionReasons = Array.isArray(det?.reasons) ? det.reasons : [];
@@ -82,23 +80,23 @@ export default function InsightsPage({ onNavigate }) {
   }, [wardMap.data]);
 
   const whyLine = safeStr(detectionReasons?.[0], risk.label);
-  const confidence = Number.isFinite(detectionPrimary?.confidence) ? detectionPrimary.confidence : 64;
+  const confidence = Number.isFinite(detectionPrimary?.confidence) ? detectionPrimary.confidence : null;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div className="card card-elevated" style={{ padding: 16, borderColor: `${tone.color}30` }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div>
-            <div className="muted" style={{ fontSize: "0.8125rem" }}>Zone</div>
-            <div style={{ fontWeight: 900, fontSize: "1.125rem" }}>{nearestWardId ? nearestWardId.replace("DEL_WARD_", "Z") : "—"}</div>
+            <div className="muted" style={{ fontSize: "0.8125rem" }}>Live source</div>
+            <div style={{ fontWeight: 900, fontSize: "1.125rem" }}>{safeStr(nearestStation?.station_name, safeStr(nearestWard?.ward_name, "—"))}</div>
           </div>
           <div style={{ textAlign: "right" }}>
             <div className="muted" style={{ fontSize: "0.8125rem" }}>Now</div>
             <div style={{ fontFamily: "var(--font-mono)", fontWeight: 950, fontSize: 34, lineHeight: 1, color: tone.color }}>
-              {aqiVal || "—"}
+              {aqiVal ?? "—"}
             </div>
             <div className="muted" style={{ fontSize: "0.8125rem" }}>
-              +3h {forecast.loading ? "…" : `${forecastVal || "—"} (${delta > 0 ? "+" : ""}${delta})`}
+              {nearestStation ? `${safeNum(nearestStation.distance_km, 0)} km away` : nearestWard ? "Using ward estimate" : "Awaiting live station"}
             </div>
           </div>
         </div>
@@ -111,18 +109,21 @@ export default function InsightsPage({ onNavigate }) {
           <span className="tag">
             Dominant: <b style={{ color: "var(--text-primary)" }}>{primaryPollutant}</b>
           </span>
+          <Badge tone={nearestStation ? "success" : nearestWard ? "info" : "warning"}>{nearestStation ? "Live CPCB station" : nearestWard ? "Ward estimate" : "No live station yet"}</Badge>
           <Badge tone={risk.tone}>{risk.level}</Badge>
           <span className="tag"><Icon name="wind" size={14} />{weather?.wind_speed != null ? `${weather.wind_speed} km/h` : "—"}</span>
           <span className="tag"><Icon name="droplet" size={14} />{weather?.humidity != null ? `${weather.humidity}%` : "—"}</span>
         </div>
       </div>
 
+      <ApiStatusStrip envData={env.data} stationsData={stations.data} />
+
       <div className="grid-2">
         <div className="card card-elevated">
           <SectionHeader
             title="AI Pollution Insight"
             right={(
-              <Badge tone="info">{confidence}% confidence</Badge>
+              <Badge tone="info">{confidence != null ? `${confidence}% confidence` : "Live"}</Badge>
             )}
           />
           <div style={{ padding: 16 }}>
@@ -134,19 +135,22 @@ export default function InsightsPage({ onNavigate }) {
                 <div style={{ fontSize: "1rem", fontWeight: 900, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                   <span>
                     Primary: <b>{safeStr(detectionPrimary?.label, "Mixed sources")}</b>
-                    {Number.isFinite(detectionPrimary?.confidence) ? ` — ${detectionPrimary.confidence}%` : ""}
+                    {Number.isFinite(detectionPrimary?.confidence) ? ` - ${detectionPrimary.confidence}%` : ""}
                   </span>
                   {detectionSecondary?.label ? (
                     <span className="tag">
                       <Icon name={detectionSecondary?.icon || "info"} size={14} />
                       Secondary: <b style={{ color: "var(--text-primary)" }}>{safeStr(detectionSecondary.label, "—")}</b>
-                      {Number.isFinite(detectionSecondary?.confidence) ? ` — ${detectionSecondary.confidence}%` : ""}
+                      {Number.isFinite(detectionSecondary?.confidence) ? ` - ${detectionSecondary.confidence}%` : ""}
                     </span>
                   ) : null}
                 </div>
 
                 <div className="muted" style={{ marginTop: 8, lineHeight: 1.65 }}>
                   Why: {whyLine || "Using pollution + weather context (fallback)."}
+                </div>
+                <div className="muted" style={{ marginTop: 8 }}>
+                  This explanation uses nearby live station pollutants and current weather. Zone comparisons below remain modelled ward summaries.
                 </div>
 
                 <div style={{ marginTop: 10 }}>
@@ -263,6 +267,9 @@ export default function InsightsPage({ onNavigate }) {
       <div className="grid-2">
         <div className="card card-elevated" style={{ padding: 16 }}>
           <SectionHeader title="Zone ranking near you" right={<Badge tone="info">{rankingNearYou.length ? "Top 6" : "—"}</Badge>} />
+          <div className="muted" style={{ marginTop: 6 }}>
+            These are zone-level model summaries, not exact local sensor readings.
+          </div>
           <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
             {rankingNearYou.length ? rankingNearYou.map((r, i) => {
               const t = aqiTone(r.aqi);
@@ -290,6 +297,9 @@ export default function InsightsPage({ onNavigate }) {
 
         <div className="card card-elevated" style={{ padding: 16 }}>
           <SectionHeader title="Comparative AQI" right={<Badge tone="info">City</Badge>} />
+          <div className="muted" style={{ marginTop: 6 }}>
+            City comparisons below come from the ward model layer.
+          </div>
           <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
             <div className="card-flat" style={{ padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div>
@@ -335,6 +345,9 @@ export default function InsightsPage({ onNavigate }) {
 
       <div className="card card-elevated">
         <SectionHeader title="Pollutant mix" right={<Badge tone="info">Zone {nearestWardId || "—"}</Badge>} />
+        <div className="muted" style={{ padding: "0 16px 8px" }}>
+          Detailed pollutant mix still comes from the zone model layer until station-level historical breakdown is wired in.
+        </div>
         {breakdown.loading ? (
           <div style={{ padding: 16 }}><Skeleton height="92px" /></div>
         ) : (
@@ -355,4 +368,3 @@ export default function InsightsPage({ onNavigate }) {
     </div>
   );
 }
-

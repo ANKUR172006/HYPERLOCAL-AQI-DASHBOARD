@@ -37,11 +37,20 @@ class WeatherCollector:
             payload = get_json_with_retry(settings.open_meteo_base_url, params=params)
             hourly = payload.get("hourly", {})
             times = hourly.get("time") or []
-            idx = 0
             ts = _utcnow()
+            idx = 0
             if times:
                 try:
-                    ts = datetime.fromisoformat(str(times[0])).replace(tzinfo=timezone.utc)
+                    parsed = []
+                    now = _utcnow()
+                    for i, item in enumerate(times):
+                        try:
+                            dt = datetime.fromisoformat(str(item)).replace(tzinfo=timezone.utc)
+                            parsed.append((i, dt))
+                        except ValueError:
+                            continue
+                    if parsed:
+                        idx, ts = min(parsed, key=lambda item: abs((item[1] - now).total_seconds()))
                 except ValueError:
                     ts = _utcnow()
 

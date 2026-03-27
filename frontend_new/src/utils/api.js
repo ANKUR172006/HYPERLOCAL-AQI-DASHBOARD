@@ -22,6 +22,19 @@ async function postJson(path, body) {
   return res.json();
 }
 
+async function patchJson(path, body) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(text || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
 export const api = {
   getWardMap(lat, lon, cityId = "DELHI") {
     const qs = new URLSearchParams({
@@ -94,22 +107,48 @@ export const api = {
     const qs = new URLSearchParams({ city_id: cityId });
     return getJson(`/gov/recommendations?${qs.toString()}`);
   },
+  getReadiness() {
+    return getJson(`/readiness`);
+  },
+  getDisasterOfficerView(cityId = "DELHI", topN = 10) {
+    const qs = new URLSearchParams({ city_id: cityId, top_n: String(topN) });
+    return getJson(`/disaster/officer-view?${qs.toString()}`);
+  },
+  getDisasterStatus(cityId = "DELHI") {
+    const qs = new URLSearchParams({ city_id: cityId });
+    return getJson(`/disaster/status?${qs.toString()}`);
+  },
+  getWardReportSummary(wardId, days = 7) {
+    const qs = new URLSearchParams({ ward_id: String(wardId), days: String(days) });
+    return getJson(`/reports/ward-summary?${qs.toString()}`);
+  },
   getComplaints(cityId = "DELHI") {
     const qs = new URLSearchParams({ city_id: cityId });
     return getJson(`/complaints?${qs.toString()}`);
   },
-  updateComplaint(_id, _patch) {
-    // Prototype backend doesn't implement updates yet; keep UI responsive.
-    return Promise.resolve({ ok: true });
+  updateComplaint(id, patch) {
+    return patchJson(`/complaints/${id}`, patch);
   },
   patchComplaint(id, patch) {
-    return Promise.resolve({ id, ...patch, ok: true });
+    return patchJson(`/complaints/${id}`, patch);
   },
   getDelhiBoundary() {
     return getJson(`/geojson/delhi-boundary`);
   },
   getDelhiWardsGrid() {
     return getJson(`/geojson/delhi-wards-grid`);
+  },
+  getLocationBoundary(lat, lon) {
+    const qs = new URLSearchParams({ lat: String(lat), lon: String(lon) });
+    return getJson(`/geojson/location-boundary?${qs.toString()}`);
+  },
+  searchLocations(query, limit = 5) {
+    const qs = new URLSearchParams({ q: String(query), limit: String(limit) });
+    return getJson(`/location/search?${qs.toString()}`);
+  },
+  getLocationVirtualGrid(lat, lon, gridSize = 25) {
+    const qs = new URLSearchParams({ lat: String(lat), lon: String(lon), grid_size: String(gridSize) });
+    return getJson(`/geojson/location-virtual-grid?${qs.toString()}`);
   },
   getNewDelhiBoundary() {
     return getJson(`/geojson/new-delhi-boundary`);

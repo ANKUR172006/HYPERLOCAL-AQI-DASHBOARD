@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from app.core.config import settings
+from app.services.collectors.http_client import get_json_with_retry
 
 
 def _utcnow() -> datetime:
@@ -25,11 +26,8 @@ class SatelliteSnapshot:
 _SAT_CACHE: dict[tuple[float, float, str], tuple[datetime, SatelliteSnapshot]] = {}
 _SAT_FAIL_TS: dict[tuple[float, float, str], datetime] = {}
 
-# Fresh cache: return instantly with no network.
 _SAT_FRESH_TTL = timedelta(minutes=60)
-# Stale cache: still return to user if NASA is flaky.
 _SAT_STALE_TTL = timedelta(hours=12)
-# After failure, avoid immediate repeated retries.
 _SAT_FAIL_COOLDOWN = timedelta(minutes=20)
 
 
@@ -41,34 +39,75 @@ class SatelliteCollector:
         cached = cached_item[1] if cached_item else None
         cache_age = (now - cached_item[0]) if cached_item else None
 
-        # Best UX path: fresh cache is always instant.
         if cached and cache_age is not None and cache_age <= _SAT_FRESH_TTL:
             return cached
 
-        # If NASA recently failed, serve cache/degraded immediately.
         fail_ts = _SAT_FAIL_TS.get(key)
         if fail_ts and (now - fail_ts) <= _SAT_FAIL_COOLDOWN:
             if cached and cache_age is not None and cache_age <= _SAT_STALE_TTL:
                 return cached
-            return self._degraded(lat, lon, date_utc, "nasa_call_in_cooldown_after_failure")
+            return self._degraded(lat, lon, date_utc, "satellite_call_in_cooldown_after_failure")
 
-        # FIRMS-only mode: never call `api.nasa.gov`. Use FIRMS hotspots as the "satellite" signal.
-        # This keeps the UI satellite panel active without requiring a NASA API key.
-        if "api.nasa.gov" in str(getattr(settings, "nasa_earth_base_url", "") or ""):
-            snap = self._firms_satellite(lat, lon, date_utc)
-            _SAT_CACHE[key] = (now, snap)
-            return snap
-
-        # Attempt live refresh only when needed.
         if not settings.external_apis_enabled:
             if cached and cache_age is not None and cache_age <= _SAT_STALE_TTL:
                 return cached
             return self._degraded(lat, lon, date_utc, "external_apis_disabled")
-        if cached and cache_age is not None and cache_age <= _SAT_STALE_TTL:
-            return cached
-        snap = self._firms_satellite(lat, lon, date_utc)
-        _SAT_CACHE[key] = (now, snap)
-        return snap
+
+        try:
+            if (settings.nasa_api_key or "").strip():
+                snap = self._nasa_satellite(lat, lon, date_utc)
+            elif (settings.firms_map_key or "").strip():
+                snap = self._firms_satellite(lat, lon, date_utc)
+            else:
+                snap = self._degraded(lat, lon, date_utc, "missing_nasa_and_firms_keys")
+            _SAT_CACHE[key] = (now, snap)
+            return snap
+        except Exception as exc:
+            _SAT_FAIL_TS[key] = now
+            if cached and cache_age is not None and cache_age <= _SAT_STALE_TTL:
+                return cached
+            return self._degraded(lat, lon, date_utc, f"satellite_fetch_failed:{type(exc).__name__}")
+
+    def _nasa_satellite(self, lat: float, lon: float, date_utc: str) -> SatelliteSnapshot:
+        base = str(settings.nasa_earth_base_url or "").rstrip("/")
+        if base.endswith("/imagery"):
+            base = f"{base.rsplit('/', 1)[0]}/assets"
+        params = {
+            "lat": float(lat),
+            "lon": float(lon),
+            "date": date_utc,
+            "dim": 0.15,
+            "api_key": settings.nasa_api_key,
+        }
+        payload = get_json_with_retry(base, params=params)
+        if not isinstance(payload, dict):
+            raise ValueError("NASA assets payload is not a JSON object")
+
+        image_reference = str(payload.get("url") or payload.get("image") or "")
+        timestamp_text = str(payload.get("date") or payload.get("timestamp") or date_utc)
+        try:
+            ts = datetime.fromisoformat(timestamp_text.replace("Z", "+00:00"))
+        except ValueError:
+            ts = _utcnow()
+
+        cloud_score = payload.get("cloud_score")
+        aerosol_index = None
+        try:
+            if cloud_score is not None:
+                aerosol_index = float(cloud_score)
+        except (TypeError, ValueError):
+            aerosol_index = None
+
+        return SatelliteSnapshot(
+            latitude=lat,
+            longitude=lon,
+            date_utc=date_utc,
+            ts_utc=ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc),
+            image_reference=image_reference,
+            aerosol_index=aerosol_index,
+            imagery_metadata=payload,
+            source="NASA_EARTH",
+        )
 
     def _firms_satellite(self, lat: float, lon: float, date_utc: str) -> SatelliteSnapshot:
         from app.services.collectors.firms_collector import FirmsCollector
@@ -76,7 +115,6 @@ class SatelliteCollector:
         firms = FirmsCollector().fetch_nearby(lat=lat, lon=lon, radius_km=10.0, days=1, source="VIIRS_SNPP_NRT")
         fires = firms.get("fires") or []
         fire_nearby = bool(firms.get("fireNearby"))
-        # Use a simple "satellite index" proxy so the UI has a numeric signal to plot if needed.
         try:
             proxy_index = float(min(10, len(fires)))
         except Exception:
@@ -90,7 +128,7 @@ class SatelliteCollector:
             aerosol_index=proxy_index,
             imagery_metadata={
                 "provider": "FIRMS",
-                "note": "firms_hotspots_proxy",
+                "note": "live_firms_hotspots_proxy",
                 "fireNearby": fire_nearby,
                 "hotspot_count": len(fires),
             },

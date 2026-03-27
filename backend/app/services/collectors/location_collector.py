@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import re
 
 from app.core.config import settings
 from app.services.collectors.http_client import get_json_with_retry
@@ -68,3 +69,67 @@ class LocationCollector:
                 raw={},
                 ts_utc=_utcnow(),
             )
+
+    def search_places(self, query: str, limit: int = 5) -> list[dict]:
+        text = str(query or "").strip()
+        if not text:
+            return []
+
+        coord_match = re.match(r"^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$", text)
+        if coord_match:
+            lat = float(coord_match.group(1))
+            lon = float(coord_match.group(2))
+            snap = self.reverse_geocode(lat, lon)
+            label_parts = [snap.locality, snap.city, snap.district, snap.state, snap.country]
+            label = ", ".join(part for part in label_parts if part) or f"{lat:.6f}, {lon:.6f}"
+            return [
+                {
+                    "display_name": label,
+                    "lat": round(lat, 6),
+                    "lon": round(lon, 6),
+                    "city": snap.city,
+                    "district": snap.district,
+                    "state": snap.state,
+                    "country": snap.country,
+                    "source": "COORDINATE_INPUT",
+                }
+            ]
+
+        params = {
+            "format": "jsonv2",
+            "q": text,
+            "addressdetails": 1,
+            "limit": max(1, min(int(limit), 10)),
+            "countrycodes": "in",
+        }
+        headers = {"User-Agent": "HyperlocalWardPollutionIntel/1.0"}
+        try:
+            payload = get_json_with_retry(settings.nominatim_search_url, params=params, headers=headers)
+        except Exception:
+            return []
+        if not isinstance(payload, list):
+            return []
+
+        results: list[dict] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            try:
+                lat = float(item.get("lat"))
+                lon = float(item.get("lon"))
+            except Exception:
+                continue
+            addr = item.get("address", {}) if isinstance(item.get("address"), dict) else {}
+            results.append(
+                {
+                    "display_name": str(item.get("display_name") or f"{lat:.6f}, {lon:.6f}"),
+                    "lat": round(lat, 6),
+                    "lon": round(lon, 6),
+                    "city": str(addr.get("city") or addr.get("town") or addr.get("municipality") or ""),
+                    "district": str(addr.get("state_district") or addr.get("county") or ""),
+                    "state": str(addr.get("state") or ""),
+                    "country": str(addr.get("country") or ""),
+                    "source": "NOMINATIM_SEARCH",
+                }
+            )
+        return results

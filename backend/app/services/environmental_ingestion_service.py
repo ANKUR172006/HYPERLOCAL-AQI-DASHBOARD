@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -19,6 +19,14 @@ from app.services.source_detection import detect_pollution_sources
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _as_aware_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -138,26 +146,31 @@ class EnvironmentalIngestionService:
                 "wind_direction": weather.wind_direction_10m,
                 "surface_pressure": weather.surface_pressure,
                 "timestamp": weather.ts_utc.isoformat(),
+                "source": weather.source,
             },
             satellite={
                 "aerosol_index": sat.aerosol_index,
                 "image_reference": sat.image_reference,
                 "timestamp": sat.ts_utc.isoformat(),
                 "metadata": sat.imagery_metadata,
+                "source": sat.source,
             },
             fires=fires,
         )
 
     def latest_for_coordinates(self, lat: float, lon: float) -> UnifiedEnvironmentalRecord:
-        recent_loc = self.db.scalars(select(LocationMetadata).order_by(LocationMetadata.ts_utc.desc())).first()
-        recent_sat = self.db.scalars(select(SatelliteData).order_by(SatelliteData.ts_utc.desc())).first()
-        recent_weather = self.db.scalars(select(WeatherData).order_by(WeatherData.ts_utc.desc())).first()
+        recent_loc = self._nearest_recent_location(lat, lon)
+        recent_sat = self._nearest_recent_satellite(lat, lon)
+        recent_weather = self._nearest_recent_weather(lat, lon)
         recent_pollution = self.db.scalars(select(PollutionReading).order_by(PollutionReading.ts_utc.desc())).first()
+        if self._should_refresh(lat, lon, recent_loc, recent_weather, recent_sat):
+            return self.ingest_for_coordinates(lat, lon)
         station_name = ""
         if recent_pollution:
             station = self.db.get(Station, recent_pollution.station_id)
             station_name = station.station_name if station else ""
         city_name = (recent_loc.city if recent_loc else "") or (recent_loc.district if recent_loc else "") or "Unknown City"
+        fires = self.firms.fetch_nearby(lat=lat, lon=lon, radius_km=10.0, days=1)
         return UnifiedEnvironmentalRecord(
             location={
                 "city": city_name,
@@ -185,15 +198,64 @@ class EnvironmentalIngestionService:
                 "wind_direction": recent_weather.wind_direction_10m if recent_weather else None,
                 "surface_pressure": recent_weather.surface_pressure if recent_weather else None,
                 "timestamp": recent_weather.ts_utc.isoformat() if recent_weather else None,
+                "source": recent_weather.source if recent_weather else None,
             },
             satellite={
                 "aerosol_index": recent_sat.aerosol_index if recent_sat else None,
                 "image_reference": recent_sat.image_reference if recent_sat else "",
                 "timestamp": recent_sat.ts_utc.isoformat() if recent_sat else None,
                 "metadata": recent_sat.imagery_metadata_json if recent_sat else {},
+                "source": recent_sat.source if recent_sat else None,
             },
-            fires={"fires": [], "fireNearby": False, "enabled": False, "reason": "not_cached"},
+            fires=fires,
         )
+
+    def _nearest_recent_location(self, lat: float, lon: float) -> LocationMetadata | None:
+        rows = self.db.scalars(select(LocationMetadata).order_by(LocationMetadata.ts_utc.desc()).limit(25)).all()
+        if not rows:
+            return None
+        return min(rows, key=lambda row: _haversine_km(lat, lon, float(row.latitude), float(row.longitude)))
+
+    def _nearest_recent_weather(self, lat: float, lon: float) -> WeatherData | None:
+        rows = self.db.scalars(select(WeatherData).order_by(WeatherData.ts_utc.desc()).limit(25)).all()
+        if not rows:
+            return None
+        return min(rows, key=lambda row: _haversine_km(lat, lon, float(row.latitude), float(row.longitude)))
+
+    def _nearest_recent_satellite(self, lat: float, lon: float) -> SatelliteData | None:
+        rows = self.db.scalars(select(SatelliteData).order_by(SatelliteData.ts_utc.desc()).limit(25)).all()
+        if not rows:
+            return None
+        return min(rows, key=lambda row: _haversine_km(lat, lon, float(row.latitude), float(row.longitude)))
+
+    def _should_refresh(
+        self,
+        lat: float,
+        lon: float,
+        loc: LocationMetadata | None,
+        weather: WeatherData | None,
+        sat: SatelliteData | None,
+    ) -> bool:
+        now = _utc_now()
+        max_age = timedelta(hours=2)
+        max_distance_km = 25.0
+
+        if weather is None or sat is None or loc is None:
+            return True
+        weather_ts = _as_aware_utc(weather.ts_utc)
+        sat_ts = _as_aware_utc(sat.ts_utc)
+        loc_ts = _as_aware_utc(loc.ts_utc)
+        if not weather_ts or not sat_ts or not loc_ts:
+            return True
+        if now - weather_ts > max_age or now - sat_ts > max_age or now - loc_ts > max_age:
+            return True
+        if _haversine_km(lat, lon, float(loc.latitude), float(loc.longitude)) > max_distance_km:
+            return True
+        if _haversine_km(lat, lon, float(weather.latitude), float(weather.longitude)) > max_distance_km:
+            return True
+        if _haversine_km(lat, lon, float(sat.latitude), float(sat.longitude)) > max_distance_km:
+            return True
+        return False
 
     def _load_cpcb(self) -> list[StationObservation]:
         source = CpcbSource(
@@ -235,15 +297,29 @@ class EnvironmentalIngestionService:
             self.db.add(station)
             self.db.flush()
             return station
-        station.station_name = row.station_name
-        station.city = loc.city or station.city
-        station.state = loc.state or station.state
-        station.latitude = row.latitude
-        station.longitude = row.longitude
-        station.geom_wkt = f"POINT({row.longitude} {row.latitude})"
-        station.updated_at_utc = _utc_now()
-        self.db.add(station)
-        self.db.flush()
+        changed = False
+        if station.station_name != row.station_name:
+            station.station_name = row.station_name
+            changed = True
+        if (loc.city or station.city) != station.city:
+            station.city = loc.city or station.city
+            changed = True
+        if (loc.state or station.state) != station.state:
+            station.state = loc.state or station.state
+            changed = True
+        if float(station.latitude) != float(row.latitude):
+            station.latitude = row.latitude
+            changed = True
+        if float(station.longitude) != float(row.longitude):
+            station.longitude = row.longitude
+            changed = True
+        geom_wkt = f"POINT({row.longitude} {row.latitude})"
+        if station.geom_wkt != geom_wkt:
+            station.geom_wkt = geom_wkt
+            changed = True
+        if changed:
+            station.updated_at_utc = _utc_now()
+            self.db.add(station)
         return station
 
     def _insert_pollution_reading(

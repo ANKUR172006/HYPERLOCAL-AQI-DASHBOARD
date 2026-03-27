@@ -36,3 +36,6 @@ pytest-cache-files-*
 
 .DS_Store
 Thumbs.db
+.vscode/
+backend/tests/_tmp/
+backend/.pytest_tmp/

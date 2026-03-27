@@ -75,6 +75,28 @@ class CrisisEvent(Base):
     rule_version: Mapped[str] = mapped_column(String(32), default="crisis-v1")
 
 
+class DisasterAssessment(Base):
+    __tablename__ = "disaster_assessments"
+    assessment_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, default=now_utc)
+    ward_id: Mapped[str] = mapped_column(ForeignKey("wards.ward_id"), index=True)
+    alert_level: Mapped[str] = mapped_column(String(20), index=True, default="Low")
+    disaster_type: Mapped[str] = mapped_column(String(40), default="normal")
+    status: Mapped[str] = mapped_column(String(20), default="NORMAL")
+    disaster_mode: Mapped[bool] = mapped_column(Boolean, default=False)
+    risk_score: Mapped[float] = mapped_column(Float, default=0.0)
+    exposure_risk: Mapped[float] = mapped_column(Float, default=0.0)
+    population_density_index: Mapped[float] = mapped_column(Float, default=0.0)
+    affected_population: Mapped[int] = mapped_column(Integer, default=0)
+    confidence_score: Mapped[float] = mapped_column(Float, default=0.0)
+    probable_causes_json: Mapped[list] = mapped_column(JSON, default=list)
+    triggers_json: Mapped[list] = mapped_column(JSON, default=list)
+    actions_json: Mapped[list] = mapped_column(JSON, default=list)
+    metrics_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    summary_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    engine_version: Mapped[str] = mapped_column(String(32), default="disaster-engine-v1")
+
+
 class PolicyRecommendation(Base):
     __tablename__ = "policy_recommendations"
     recommendation_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

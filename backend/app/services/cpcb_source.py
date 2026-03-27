@@ -42,6 +42,8 @@ class StationObservation:
     temperature: float
     observed_at_utc: datetime
     source: str
+    official_aqi: float | None = None
+    official_primary_pollutant: str | None = None
 
 
 def _first_of(payload: dict[str, Any], keys: tuple[str, ...], default: Any = None) -> Any:
@@ -120,6 +122,8 @@ def _normalize_record(row: dict[str, Any], source: str) -> StationObservation | 
         temperature=temperature,
         observed_at_utc=observed_at_utc,
         source=source,
+        official_aqi=_to_float(_first_of(row, ("official_aqi", "aqi")), default=-1.0) if _first_of(row, ("official_aqi", "aqi")) not in (None, "") else None,
+        official_primary_pollutant=str(_first_of(row, ("official_primary_pollutant", "prominent_pollutant", "primary_pollutant"), "")).strip() or None,
     )
 
 
@@ -206,14 +210,10 @@ class CpcbSource:
             params.setdefault("format", self.api_format)
             params.setdefault("offset", str(self.api_offset))
             params.setdefault("limit", str(self.api_limit))
-            if self.filter_state:
-                params.setdefault("filters[state]", self.filter_state)
-            if self.filter_city:
-                params.setdefault("filters[city]", self.filter_city)
             if self.api_key:
                 params["api-key"] = self.api_key
             url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", parsed.fragment))
-            records = self._fetch_data_gov_pollutants(url, params)
+            records = self._fetch_data_gov_pollutants_with_fallback(url, params)
         else:
             payload = self._safe_get_json(url, params)
             records = self._extract_records(payload)
@@ -230,6 +230,25 @@ class CpcbSource:
             if normalized:
                 rows.append(normalized)
         return rows
+
+    def _iter_filter_variants(self) -> list[dict[str, str]]:
+        variants: list[dict[str, str]] = []
+
+        def _add(state: str, city: str) -> None:
+            variant: dict[str, str] = {}
+            if state:
+                variant["filters[state]"] = state
+            if city:
+                variant["filters[city]"] = city
+            if variant not in variants:
+                variants.append(variant)
+
+        _add(self.filter_state, self.filter_city)
+        if self.filter_state and self.filter_city:
+            _add(self.filter_state, "")
+            _add("", self.filter_city)
+        _add("", "")
+        return variants
 
     def _fetch_data_gov_pages(self, url: str, params: dict[str, str]) -> list[dict[str, Any]]:
         limit = max(1, int(params.get("limit", str(self.api_limit))))
@@ -257,6 +276,28 @@ class CpcbSource:
             p["filters[pollutant_id]"] = pollutant
             all_records.extend(self._fetch_data_gov_pages(url, p))
         return all_records
+
+    def _fetch_data_gov_pollutants_with_fallback(self, url: str, base_params: dict[str, str]) -> list[dict[str, Any]]:
+        variants = self._iter_filter_variants()
+        last_records: list[dict[str, Any]] = []
+        for index, filters in enumerate(variants):
+            params = {
+                k: v
+                for k, v in base_params.items()
+                if k not in {"filters[state]", "filters[city]"}
+            }
+            params.update(filters)
+            records = self._fetch_data_gov_pollutants(url, params)
+            if records:
+                if index > 0:
+                    logger.warning(
+                        "CPCB API returned no rows for strict filters; falling back to state=%r city=%r",
+                        filters.get("filters[state]", ""),
+                        filters.get("filters[city]", ""),
+                    )
+                return records
+            last_records = records
+        return last_records
 
     def _safe_get_json(self, url: str, params: dict[str, str] | None) -> Any:
         if not getattr(settings, "external_apis_enabled", True):
@@ -325,6 +366,8 @@ class CpcbSource:
                     "temperature": 28.0,
                     "wind_speed": 2.5,
                     "wind_direction": 180.0,
+                    "_official_aqi": None,
+                    "_official_primary_pollutant": None,
                 }
             if ts and (not groups[key]["timestamp"] or ts > str(groups[key]["timestamp"])):
                 groups[key]["timestamp"] = ts
@@ -332,6 +375,11 @@ class CpcbSource:
             pol_avg = _to_float(_first_of(row, ("pollutant_avg", "avg_value", "avg")), default=-1.0)
             normalized_pol = pol_map.get(pol_id)
             if normalized_pol and pol_avg >= 0:
+                # api.data.gov.in CPCB records expose pollutant-wise AQI-style values.
+                # Preserve the station's official AQI view directly from these values.
+                if groups[key]["_official_aqi"] is None or float(pol_avg) >= float(groups[key]["_official_aqi"]):
+                    groups[key]["_official_aqi"] = float(pol_avg)
+                    groups[key]["_official_primary_pollutant"] = "O3" if pol_id == "OZONE" else pol_id
                 # Data.gov CPCB datasets sometimes report CO on a different scale than mg/m3 (e.g., ug/m3-like).
                 # Heuristic: values >10 are unlikely to be mg/m3 in ambient air; downscale to mg/m3.
                 if normalized_pol == "co" and pol_avg > 10:
@@ -355,6 +403,8 @@ class CpcbSource:
             for pollutant in ("pm25", "pm10", "no2", "so2", "o3", "co"):
                 if group[pollutant] is None:
                     group[pollutant] = defaults[pollutant]
+            group["official_aqi"] = group.get("_official_aqi")
+            group["official_primary_pollutant"] = group.get("_official_primary_pollutant")
             normalized = _normalize_record(group, source="cpcb_api")
             if normalized:
                 out.append(normalized)
