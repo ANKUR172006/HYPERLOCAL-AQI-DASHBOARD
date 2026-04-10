@@ -3,15 +3,29 @@ import { api } from '../utils/api';
 
 export const APP_AUTO_REFRESH_MS = 300_000;
 
-const GEOLOCATION_MODE = String(import.meta?.env?.VITE_GEOLOCATION_MODE || 'off').toLowerCase(); // demo | device | off
-const DEMO_LOCATION_LABEL = String(import.meta?.env?.VITE_DEMO_LOCATION_LABEL || 'Pragati Maidan, Delhi');
-const DEMO_LOCATION_LAT = Number(import.meta?.env?.VITE_DEMO_LAT || 28.6129);
-const DEMO_LOCATION_LON = Number(import.meta?.env?.VITE_DEMO_LON || 77.2295);
+const GEOLOCATION_MODE = String(import.meta?.env?.VITE_GEOLOCATION_MODE || 'device').toLowerCase(); // demo | device | off
+const DEMO_LOCATION_LABEL = String(import.meta?.env?.VITE_DEMO_LOCATION_LABEL || 'WCTM College, Gurugram');
+const DEMO_LOCATION_LAT = Number(import.meta?.env?.VITE_DEMO_LAT || 28.4440009);
+const DEMO_LOCATION_LON = Number(import.meta?.env?.VITE_DEMO_LON || 76.7709646);
 const LOCATION_STORAGE_KEY = 'aqi:selected_location';
 const LOCATION_EVENT = 'aqi:selected-location-changed';
+const LOCATION_SESSION_KEY = 'aqi:selected_location_session';
+
+function currentLocationSessionId() {
+  try {
+    let id = sessionStorage.getItem(LOCATION_SESSION_KEY);
+    if (!id) {
+      id = `session-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      sessionStorage.setItem(LOCATION_SESSION_KEY, id);
+    }
+    return id;
+  } catch {
+    return 'session-unavailable';
+  }
+}
 
 function defaultLocation() {
-  return { lat: DEMO_LOCATION_LAT, lon: DEMO_LOCATION_LON, label: DEMO_LOCATION_LABEL, source: 'default' };
+  return { lat: DEMO_LOCATION_LAT, lon: DEMO_LOCATION_LON, label: DEMO_LOCATION_LABEL, source: 'demo' };
 }
 
 function normalizeStoredLocation(value) {
@@ -24,12 +38,17 @@ function normalizeStoredLocation(value) {
     lon,
     label: String(value.label || 'Selected location'),
     source: String(value.source || 'search'),
+    sessionId: String(value.sessionId || ''),
   };
 }
 
 function readStoredLocation() {
   try {
-    return normalizeStoredLocation(JSON.parse(localStorage.getItem(LOCATION_STORAGE_KEY) || 'null'));
+    const normalized = normalizeStoredLocation(JSON.parse(localStorage.getItem(LOCATION_STORAGE_KEY) || 'null'));
+    if (!normalized) return null;
+    if (normalized.sessionId && normalized.sessionId === currentLocationSessionId()) return normalized;
+    localStorage.removeItem(LOCATION_STORAGE_KEY);
+    return null;
   } catch {
     return null;
   }
@@ -38,9 +57,10 @@ function readStoredLocation() {
 function writeStoredLocation(location) {
   const normalized = normalizeStoredLocation(location);
   if (!normalized) return null;
-  localStorage.setItem(LOCATION_STORAGE_KEY, JSON.stringify(normalized));
-  window.dispatchEvent(new CustomEvent(LOCATION_EVENT, { detail: normalized }));
-  return normalized;
+  const payload = { ...normalized, sessionId: currentLocationSessionId() };
+  localStorage.setItem(LOCATION_STORAGE_KEY, JSON.stringify(payload));
+  window.dispatchEvent(new CustomEvent(LOCATION_EVENT, { detail: payload }));
+  return payload;
 }
 
 function clearStoredLocation() {
@@ -92,34 +112,86 @@ export function useAsync(asyncFn, deps = [], options = {}) {
 
 // Geolocation hook
 export function useGeolocation() {
-  const [geo, setGeo] = useState({ lat: null, lon: null, loading: true, error: null, mode: GEOLOCATION_MODE, label: DEMO_LOCATION_LABEL });
+  const [geo, setGeo] = useState({
+    lat: null,
+    lon: null,
+    accuracy: null,
+    loading: true,
+    error: null,
+    mode: GEOLOCATION_MODE,
+    label: GEOLOCATION_MODE === 'device' ? 'Fetching current location' : DEMO_LOCATION_LABEL,
+  });
 
-  useEffect(() => {
+  const applyDevicePosition = useCallback((pos) => {
+    setGeo({
+      lat: pos.coords.latitude,
+      lon: pos.coords.longitude,
+      accuracy: Number.isFinite(pos.coords.accuracy) ? pos.coords.accuracy : null,
+      loading: false,
+      error: null,
+      mode: 'device',
+      label: 'Current location',
+    });
+  }, []);
+
+  const requestLocation = useCallback(() => {
     if (GEOLOCATION_MODE === 'off') {
-      setGeo({ lat: null, lon: null, loading: false, error: 'disabled', mode: 'off', label: DEMO_LOCATION_LABEL });
+      setGeo({ lat: null, lon: null, accuracy: null, loading: false, error: 'disabled', mode: 'off', label: DEMO_LOCATION_LABEL });
       return;
     }
 
     if (GEOLOCATION_MODE !== 'device') {
-      setGeo({ lat: DEMO_LOCATION_LAT, lon: DEMO_LOCATION_LON, loading: false, error: null, mode: 'demo', label: DEMO_LOCATION_LABEL });
+      setGeo({ lat: DEMO_LOCATION_LAT, lon: DEMO_LOCATION_LON, accuracy: null, loading: false, error: null, mode: 'demo', label: DEMO_LOCATION_LABEL });
       return;
     }
 
     if (!navigator.geolocation) {
-      setGeo({ lat: DEMO_LOCATION_LAT, lon: DEMO_LOCATION_LON, loading: false, error: 'geolocation_unsupported', mode: 'demo', label: DEMO_LOCATION_LABEL });
+      setGeo({ lat: DEMO_LOCATION_LAT, lon: DEMO_LOCATION_LON, accuracy: null, loading: false, error: 'geolocation_unsupported', mode: 'demo', label: DEMO_LOCATION_LABEL });
       return;
     }
+    setGeo((prev) => ({
+      lat: Number.isFinite(prev.lat) ? prev.lat : null,
+      lon: Number.isFinite(prev.lon) ? prev.lon : null,
+      accuracy: Number.isFinite(prev.accuracy) ? prev.accuracy : null,
+      loading: true,
+      error: null,
+      mode: Number.isFinite(prev.lat) && Number.isFinite(prev.lon) ? 'device' : GEOLOCATION_MODE,
+      label: Number.isFinite(prev.lat) && Number.isFinite(prev.lon) ? 'Current location' : 'Fetching current location',
+    }));
     navigator.geolocation.getCurrentPosition(
-      (pos) => setGeo({ lat: pos.coords.latitude, lon: pos.coords.longitude, loading: false, error: null, mode: 'device', label: 'Device location' }),
+      applyDevicePosition,
       (err) => {
-        // Fallback to Delhi center
-        setGeo({ lat: DEMO_LOCATION_LAT, lon: DEMO_LOCATION_LON, loading: false, error: err.code === 1 ? 'denied' : 'unavailable', mode: 'demo', label: DEMO_LOCATION_LABEL });
+        setGeo({
+          lat: DEMO_LOCATION_LAT,
+          lon: DEMO_LOCATION_LON,
+          accuracy: null,
+          loading: false,
+          error: err.code === 1 ? 'denied' : 'unavailable',
+          mode: 'demo',
+          label: DEMO_LOCATION_LABEL,
+        });
       },
-      { timeout: 8000, maximumAge: 60000 }
+      { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
     );
-  }, []);
+  }, [applyDevicePosition]);
 
-  return geo;
+  useEffect(() => {
+    requestLocation();
+  }, [requestLocation]);
+
+  useEffect(() => {
+    if (GEOLOCATION_MODE !== 'device' || !navigator.geolocation) return undefined;
+    const watchId = navigator.geolocation.watchPosition(
+      applyDevicePosition,
+      () => {
+        // Ignore watch errors after the initial fetch; keep the last good position.
+      },
+      { enableHighAccuracy: true, timeout: 20000, maximumAge: 15000 },
+    );
+    return () => navigator.geolocation.clearWatch(watchId);
+  }, [applyDevicePosition]);
+
+  return { ...geo, refresh: requestLocation };
 }
 
 export function useSelectedLocation() {
@@ -169,6 +241,7 @@ export function useAppLocation() {
     hasSelectedLocation: !!selected.location,
     setSelectedLocation: selected.setLocation,
     clearSelectedLocation: selected.clearLocation,
+    refreshCurrentLocation: geo.refresh,
     geo,
   };
 }
@@ -211,8 +284,8 @@ export function useWardAlerts(wardId) {
   return useAsync(wardId ? () => api.getWardAlerts(wardId) : null, [wardId], { refreshMs: APP_AUTO_REFRESH_MS });
 }
 
-export function useAlertsFeed() {
-  return useAsync(() => api.getAlertsFeed(12), [], { refreshMs: APP_AUTO_REFRESH_MS });
+export function useAlertsFeed(cityId = 'DELHI', limit = 12) {
+  return useAsync(() => api.getAlertsFeed(limit, cityId), [cityId, limit], { refreshMs: APP_AUTO_REFRESH_MS });
 }
 
 export function useTrends(wardId) {
@@ -235,16 +308,16 @@ export function useWardMap(lat, lon) {
   );
 }
 
-export function useGovRecommendations() {
-  return useAsync(() => api.getGovRecommendations(), [], { refreshMs: APP_AUTO_REFRESH_MS });
+export function useGovRecommendations(cityId = 'DELHI') {
+  return useAsync(() => api.getGovRecommendations(cityId), [cityId], { refreshMs: APP_AUTO_REFRESH_MS });
 }
 
 export function useReadiness() {
   return useAsync(() => api.getReadiness(), [], { refreshMs: APP_AUTO_REFRESH_MS });
 }
 
-export function useComplaints() {
-  return useAsync(() => api.getComplaints(), [], { refreshMs: APP_AUTO_REFRESH_MS });
+export function useComplaints(cityId = 'DELHI') {
+  return useAsync(() => api.getComplaints(cityId), [cityId], { refreshMs: APP_AUTO_REFRESH_MS });
 }
 
 export function useEnvironmentUnified(lat, lon, refresh = false) {

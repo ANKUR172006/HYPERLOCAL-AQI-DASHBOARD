@@ -1,6 +1,6 @@
 import { useState } from "react";
 import Icon from "../ui/Icon.jsx";
-import { useAppLocation } from "../../hooks/index.js";
+import { useAppLocation, useLocationBoundary } from "../../hooks/index.js";
 import { api } from "../../utils/api.js";
 
 const NAV = [
@@ -13,10 +13,19 @@ const NAV = [
 
 export default function AppLayout({ page, onNavigate, theme, onThemeToggle, children }) {
   const location = useAppLocation();
+  const locationBoundary = useLocationBoundary(location.lat, location.lon);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const region = locationBoundary.data?.region || null;
+  const resolvedLabel = [
+    String(region?.district || "").trim(),
+    String(region?.city || "").trim(),
+    String(region?.state || "").trim(),
+  ].filter(Boolean).join(", ") || location.label;
+  const locationModeLabel =
+    location.hasSelectedLocation ? "searched" : location.mode === "device" ? "live GPS" : location.mode === "demo" ? "campus fallback" : "default";
 
   async function handleSearch(event) {
     event?.preventDefault?.();
@@ -56,9 +65,17 @@ export default function AppLayout({ page, onNavigate, theme, onThemeToggle, chil
 
   function clearLocation() {
     location.clearSelectedLocation();
+    location.refreshCurrentLocation?.();
     setResults([]);
     setError("");
     setQuery("");
+  }
+
+  function useCurrentLocation() {
+    location.clearSelectedLocation();
+    location.refreshCurrentLocation?.();
+    setResults([]);
+    setError("");
   }
 
   return (
@@ -70,7 +87,7 @@ export default function AppLayout({ page, onNavigate, theme, onThemeToggle, chil
           </div>
           <div>
             <div className="sidebar-logo-text">Hyperlocal AQI</div>
-            <div className="sidebar-logo-sub">Delhi demo</div>
+            <div className="sidebar-logo-sub">WCTM College, Gurugram</div>
           </div>
         </div>
 
@@ -124,12 +141,13 @@ export default function AppLayout({ page, onNavigate, theme, onThemeToggle, chil
                 }}
               />
               <button className="btn btn-sm" type="submit">{loading ? "..." : "Search"}</button>
+              <button className="btn btn-sm" type="button" onClick={useCurrentLocation}>My location</button>
               <button className="btn btn-sm" type="button" onClick={clearLocation}>
                 {location.hasSelectedLocation ? "Clear" : "Reset"}
               </button>
             </form>
             <div className="muted" style={{ fontSize: "0.8125rem", marginTop: 6, textAlign: "right" }}>
-              Current: {location.label} {location.hasSelectedLocation ? "· searched" : "· default"}
+              Current: {resolvedLabel} · {locationModeLabel}
             </div>
             {(results.length || error) ? (
               <div style={{
@@ -191,3 +209,4 @@ export default function AppLayout({ page, onNavigate, theme, onThemeToggle, chil
     </div>
   );
 }
+

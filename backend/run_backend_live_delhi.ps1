@@ -30,13 +30,15 @@ if ($key) {
 if (-not $env:NASA_TIMEOUT_SEC) { $env:NASA_TIMEOUT_SEC = "25" }
 if (-not $env:NASA_MAX_RETRIES) { $env:NASA_MAX_RETRIES = "3" }
 
-# Optional: filter the CPCB API to Delhi (depends on upstream field values).
-if (-not $env:CPCB_FILTER_CITY) { $env:CPCB_FILTER_CITY = "Delhi" }
-if (-not $env:CPCB_FILTER_STATE) { $env:CPCB_FILTER_STATE = "Delhi" }
+# Leave CPCB filters open by default so the backend can resolve live data for
+# the active location (for example WCTM College, Gurugram) instead of forcing
+# the old Delhi-only demo feed.
+if (-not $env:CPCB_FILTER_CITY) { $env:CPCB_FILTER_CITY = "" }
+if (-not $env:CPCB_FILTER_STATE) { $env:CPCB_FILTER_STATE = "" }
 
-# Try to fetch enough rows to cover Delhi stations (Data.gov is paginated).
+# Pull enough rows/pages for non-Delhi searches too.
 if (-not $env:CPCB_API_LIMIT) { $env:CPCB_API_LIMIT = "100" }
-if (-not $env:CPCB_API_MAX_PAGES) { $env:CPCB_API_MAX_PAGES = "4" }
+if (-not $env:CPCB_API_MAX_PAGES) { $env:CPCB_API_MAX_PAGES = "6" }
 
 if (-not $env:FIRMS_MAP_KEY) {
   $envPath = Join-Path $PSScriptRoot ".env"
@@ -131,3 +133,4 @@ try {
 } finally {
   Pop-Location
 }
+http://127.0.0.1:5173/

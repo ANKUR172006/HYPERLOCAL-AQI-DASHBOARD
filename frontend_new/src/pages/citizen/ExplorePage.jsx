@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { MapContainer, TileLayer, GeoJSON, CircleMarker, Rectangle, Tooltip, useMap, useMapEvents } from "react-leaflet";
+import { MapContainer, TileLayer, GeoJSON, Circle, CircleMarker, Rectangle, Tooltip, useMap, useMapEvents } from "react-leaflet";
 import {
   useAppLocation,
   useDelhiBoundary,
@@ -18,8 +18,21 @@ import Icon from "../../components/ui/Icon.jsx";
 import { aqiTone, safeNum, safeStr } from "../../tokens/index.js";
 import { api } from "../../utils/api.js";
 
-const DEFAULT_CENTER = { lat: 28.6129, lon: 77.2295 }; // Pragati Maidan, Delhi
+const DEFAULT_CENTER = { lat: 28.4440009, lon: 76.7709646 }; // WCTM College campus, Gurugram
 const PRAGATI_MAIDAN_HIGHLIGHT = { stroke: "#ffd166", fill: "#fff3bf" };
+const MAX_FALLBACK_MAP_SENSORS = 12;
+const MAX_NEAREST_SENSOR_DETAILS = 8;
+const WCTM_CAMPUS = {
+  lat: 28.4440009,
+  lon: 76.7709646,
+  radiusMeters: 320,
+  title: "WCTM College, Gurugram",
+  shortTitle: "WCTM College",
+  address: "5 km ahead Farrukhnagar, Khera Khurrampur, Gurugram, Haryana 122506",
+  source: "Official WCTM contact page / Google Maps pin",
+  focusKm: 18,
+  regionFocusKm: 5,
+};
 
 function mixHex(a, b, t) {
   const ah = String(a).replace("#", "");
@@ -63,6 +76,20 @@ function haversineKm(lat1, lon1, lat2, lon2) {
     Math.sin(dLat / 2) ** 2 +
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
   return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function rankNearestStations(lat, lon, sensors, limit = MAX_NEAREST_SENSOR_DETAILS) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Array.isArray(sensors) || !sensors.length) return [];
+  return [...sensors]
+    .map((sensor) => ({
+      station_name: sensor.station_name,
+      station_code: sensor.station_code,
+      aqi: sensor.aqi,
+      dominant_pollutant: sensor.dominant_pollutant,
+      distance_km: Math.round(haversineKm(lat, lon, sensor.lat, sensor.lon) * 100) / 100,
+    }))
+    .sort((a, b) => safeNum(a.distance_km, 1e9) - safeNum(b.distance_km, 1e9))
+    .slice(0, limit);
 }
 
 function geometryContainsLocation(geometry, lat, lon) {
@@ -111,6 +138,37 @@ function boundsFromGeoJson(geojson) {
   } catch {
     return null;
   }
+}
+
+function boundsFromPoints(points) {
+  try {
+    let minLat = 90;
+    let minLon = 180;
+    let maxLat = -90;
+    let maxLon = -180;
+    for (const point of points || []) {
+      const lat = Number(point?.lat);
+      const lon = Number(point?.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      minLat = Math.min(minLat, lat);
+      minLon = Math.min(minLon, lon);
+      maxLat = Math.max(maxLat, lat);
+      maxLon = Math.max(maxLon, lon);
+    }
+    if (minLat > maxLat || minLon > maxLon) return null;
+    return [[minLat, minLon], [maxLat, maxLon]];
+  } catch {
+    return null;
+  }
+}
+
+function mergeBounds(a, b) {
+  if (!a) return b || null;
+  if (!b) return a || null;
+  return [
+    [Math.min(a[0][0], b[0][0]), Math.min(a[0][1], b[0][1])],
+    [Math.max(a[1][0], b[1][0]), Math.max(a[1][1], b[1][1])],
+  ];
 }
 
 function MapFocus({ enabled, bounds }) {
@@ -185,6 +243,15 @@ function isInsideDelhi(lat, lon, boundaryGeoJson) {
 
 function isInsideBoundary(lat, lon, boundaryGeoJson) {
   return isInsideDelhi(lat, lon, boundaryGeoJson);
+}
+
+function geojsonContainsLocation(geojson, lat, lon) {
+  try {
+    const features = Array.isArray(geojson?.features) ? geojson.features : [];
+    return features.some((feature) => geometryContainsLocation(feature?.geometry, lat, lon));
+  } catch {
+    return false;
+  }
 }
 
 function centroidFromGeometry(geometry) {
@@ -395,8 +462,8 @@ export default function ExplorePage() {
   const locationGrid = useLocationVirtualGrid(center.lat, center.lon, 25);
   const locationInsights = useLocationInsights(center.lat, center.lon);
   const wardMap = useWardMap(center.lat, center.lon);
-  const stations = useStationsLive(center.lat, center.lon, 70, 120);
-  const env = useEnvironmentUnified(center.lat, center.lon, true);
+  const stations = useStationsLive(center.lat, center.lon, 120, 120);
+  const env = useEnvironmentUnified(center.lat, center.lon, false);
   const firesNearby = useFiresNearby(center.lat, center.lon, 80, 2);
 
   const stationList = stations.data?.data || [];
@@ -420,22 +487,28 @@ export default function ExplorePage() {
   const isDelhiMode = locationMode === "delhi";
   const region = locationBoundary.data?.region || locationInsights.data?.region || null;
   const delhiRegionLabel = [safeStr(region?.district, ""), safeStr(region?.city, "Delhi")].filter(Boolean).join(", ");
-  const regionLabel = isDelhiMode
-    ? safeStr(delhiRegionLabel, "Delhi")
-    : [safeStr(region?.city, ""), safeStr(region?.district, ""), safeStr(region?.state, "India")].filter(Boolean).join(", ");
-  const activeLocationLabel = safeStr(location.label, regionLabel || "Selected location");
-  const boundaryGeo = locationBoundary.data?.data || boundary.data?.data || null;
+  const boundaryGeo = isDelhiMode ? (locationBoundary.data?.data || boundary.data?.data || null) : (locationBoundary.data?.data || null);
   const newDelhiGeo = newDelhiBoundary.data?.data || null;
   const wardsGeo = isDelhiMode ? (wardsGrid.data?.data || locationGrid.data?.data || null) : (locationGrid.data?.data || null);
+  const hasRealWardPolygons = safeStr(locationGrid.data?.mode, "") === "real" || (isDelhiMode && !!wardsGrid.data?.data);
   const fallbackBounds = useMemo(() => bboxFromCenterKm(DEFAULT_CENTER.lat, DEFAULT_CENTER.lon, 12), []);
   const newDelhiBounds = useMemo(() => boundsFromGeoJson(newDelhiGeo) || fallbackBounds, [newDelhiGeo, fallbackBounds]);
   const districtBounds = useMemo(() => boundsFromGeoJson(locationBoundary.data?.data) || null, [locationBoundary.data?.data]);
   const regionBounds = useMemo(() => boundsFromGeoJson(boundaryGeo) || fallbackBounds, [boundaryGeo, fallbackBounds]);
   const wardsBounds = useMemo(() => boundsFromGeoJson(wardsGeo) || districtBounds || regionBounds, [wardsGeo, districtBounds, regionBounds]);
-  const focusBounds = isDelhiMode ? (districtBounds || newDelhiBounds) : wardsBounds;
-  const activeMapBounds = isDelhiMode
-    ? (focusNewDelhi ? focusBounds : (wardsBounds || regionBounds || fallbackBounds))
-    : (wardsBounds || regionBounds || fallbackBounds);
+  const stationsInsideRegion = useMemo(() => {
+    if (!stationList.length || !boundaryGeo) return [];
+    return stationList.filter((station) => geojsonContainsLocation(boundaryGeo, station.lat, station.lon));
+  }, [boundaryGeo, stationList]);
+  const mapStationList = useMemo(() => {
+    if (!stationList.length) return [];
+    if (isDelhiMode) return stationList;
+    if (stationsInsideRegion.length) return stationsInsideRegion;
+    return [...stationList]
+      .sort((a, b) => safeNum(a.distance_km, 1e9) - safeNum(b.distance_km, 1e9))
+      .slice(0, MAX_FALLBACK_MAP_SENSORS);
+  }, [isDelhiMode, stationList, stationsInsideRegion]);
+  const sensorBounds = useMemo(() => boundsFromPoints([{ lat: center.lat, lon: center.lon }, ...mapStationList]), [center.lat, center.lon, mapStationList]);
   const wardMapRows = wardMap.data?.data || [];
   const wardMapById = useMemo(() => {
     const byId = new Map();
@@ -583,11 +656,64 @@ export default function ExplorePage() {
     return nearestWard;
   }, [center.lat, center.lon, location.hasSelectedLocation, wardsComputed.byId, wardsComputed.geo, wardsComputed.list]);
   const searchedWardId = searchedWard?.ward_id ? String(searchedWard.ward_id) : "";
+  const distanceToCampusKm = useMemo(
+    () => haversineKm(center.lat, center.lon, WCTM_CAMPUS.lat, WCTM_CAMPUS.lon),
+    [center.lat, center.lon],
+  );
+  const campusInView = distanceToCampusKm <= WCTM_CAMPUS.focusKm || safeStr(locationBoundary.data?.city_id, "").includes("GURUGRAM");
+  const regionLabel = isDelhiMode
+    ? safeStr(delhiRegionLabel, "Delhi")
+    : (campusInView ? `${WCTM_CAMPUS.shortTitle} Region` : [safeStr(region?.city, ""), safeStr(region?.district, ""), safeStr(region?.state, "India")].filter(Boolean).join(", "));
+  const activeLocationLabel = !isDelhiMode && campusInView ? `${WCTM_CAMPUS.shortTitle} campus region` : safeStr(location.label, regionLabel || "Selected location");
+  const campusRegionBounds = useMemo(
+    () => bboxFromCenterKm(WCTM_CAMPUS.lat, WCTM_CAMPUS.lon, WCTM_CAMPUS.regionFocusKm),
+    [],
+  );
+  const focusBounds = isDelhiMode ? (districtBounds || newDelhiBounds) : wardsBounds;
+  const activeMapBounds = useMemo(() => {
+    if (isDelhiMode) {
+      return focusNewDelhi ? focusBounds : (wardsBounds || regionBounds || fallbackBounds);
+    }
+    if (campusInView) {
+      return mergeBounds(campusRegionBounds, stationsInsideRegion.length ? null : sensorBounds);
+    }
+    if (stationsInsideRegion.length) {
+      return wardsBounds || regionBounds || fallbackBounds;
+    }
+    return mergeBounds(wardsBounds || regionBounds || fallbackBounds, sensorBounds) || fallbackBounds;
+  }, [
+    campusInView,
+    campusRegionBounds,
+    fallbackBounds,
+    focusBounds,
+    focusNewDelhi,
+    isDelhiMode,
+    regionBounds,
+    sensorBounds,
+    stationsInsideRegion.length,
+    wardsBounds,
+  ]);
+  const campusWard = useMemo(() => {
+    if (!campusInView) return null;
+    let nearest = null;
+    let best = Number.POSITIVE_INFINITY;
+    for (const ward of wardsComputed.list || []) {
+      const wardLat = Number(ward?.centroid_lat);
+      const wardLon = Number(ward?.centroid_lon);
+      if (!Number.isFinite(wardLat) || !Number.isFinite(wardLon)) continue;
+      const d = haversineKm(WCTM_CAMPUS.lat, WCTM_CAMPUS.lon, wardLat, wardLon);
+      if (d < best) {
+        best = d;
+        nearest = ward;
+      }
+    }
+    return nearest;
+  }, [campusInView, wardsComputed.list]);
 
   const sensorLabels = useMemo(() => {
     if (!layers.sensors) return [];
     if (zoom < 11) return [];
-    const ranked = [...stationList];
+    const ranked = [...mapStationList];
     const wardLat = Number(selectedWard?.centroid_lat);
     const wardLon = Number(selectedWard?.centroid_lon);
     if (Number.isFinite(wardLat) && Number.isFinite(wardLon)) {
@@ -598,16 +724,20 @@ export default function ExplorePage() {
       ranked.sort((a, b) => safeNum(b.aqi, 0) - safeNum(a.aqi, 0));
     }
     return ranked.slice(0, zoom >= 12 ? 14 : 8);
-  }, [layers.sensors, selectedWard?.centroid_lat, selectedWard?.centroid_lon, stationList, zoom]);
+  }, [layers.sensors, mapStationList, selectedWard?.centroid_lat, selectedWard?.centroid_lon, zoom]);
 
   const nearestSensorsForWard = useMemo(() => {
-    if (!selectedWard || !stationList.length) return [];
+    if (!selectedWard) return [];
     const lat = Number(selectedWard.centroid_lat);
     const lon = Number(selectedWard.centroid_lon);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return [];
-    if (Array.isArray(selectedWard.nearest) && selectedWard.nearest.length) return selectedWard.nearest.slice(0, 4);
-    return [];
-  }, [selectedWard, stationList]);
+    if (Array.isArray(selectedWard.nearest) && selectedWard.nearest.length) {
+      return [...selectedWard.nearest]
+        .sort((a, b) => safeNum(a.distance_km, 1e9) - safeNum(b.distance_km, 1e9))
+        .slice(0, MAX_NEAREST_SENSOR_DETAILS);
+    }
+    return rankNearestStations(lat, lon, mapStationList, MAX_NEAREST_SENSOR_DETAILS);
+  }, [mapStationList, selectedWard]);
 
   const gridCells = useMemo(() => {
     if (!layers.grid) return [];
@@ -774,6 +904,7 @@ export default function ExplorePage() {
           <Badge tone="info"><Icon name={location.mode === "search" ? "search" : location.mode === "device" ? "eye" : "flag"} size={14} /> {location.mode === "search" ? "Searched" : location.mode === "device" ? "Device" : "Default"}</Badge>
           {location.geo?.error && location.mode !== "search" ? <Badge tone="warning">GPS off: {safeStr(location.geo.error, "disabled")}</Badge> : null}
           <Badge tone="info">{activeLocationLabel}</Badge>
+          {campusInView ? <Badge tone="success">{WCTM_CAMPUS.shortTitle} · {distanceToCampusKm.toFixed(1)} km</Badge> : null}
           {isDelhiMode ? (
             <label className="tag" style={{ cursor: "pointer" }}>
               <input type="checkbox" checked={focusNewDelhi} onChange={(e) => setFocusNewDelhi(e.target.checked)} /> District focus: {safeStr(region?.district, "Delhi district")}
@@ -781,6 +912,11 @@ export default function ExplorePage() {
           ) : (
             <Badge tone="info">{safeStr(region?.district, "Detected district")} · {safeStr(region?.state, "India")}</Badge>
           )}
+          {!isDelhiMode ? (
+            <Badge tone={stationsInsideRegion.length ? "success" : "warning"}>
+              {stationsInsideRegion.length ? `${stationsInsideRegion.length} live sensors in region` : `${mapStationList.length} nearest live CPCB sensors shown`}
+            </Badge>
+          ) : null}
           <label className="tag" style={{ cursor: "pointer" }}>
             <input type="checkbox" checked={layers.sensors} onChange={(e) => setLayers((s) => ({ ...s, sensors: e.target.checked }))} /> Sensors
           </label>
@@ -800,6 +936,35 @@ export default function ExplorePage() {
           {(stations.loading || boundary.loading || wardsGrid.loading || newDelhiBoundary.loading || locationBoundary.loading || locationGrid.loading || wardMap.loading) ? <Skeleton height="14px" width="220px" /> : null}
           {(stations.error || boundary.error || wardsGrid.error || newDelhiBoundary.error || locationBoundary.error || locationGrid.error || wardMap.error) ? <span className="muted">Some layers unavailable — using last known values.</span> : null}
         </div>
+        {campusInView ? (
+          <div className="card-flat" style={{ marginTop: 12, padding: 12, display: "grid", gap: 8 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <div style={{ fontWeight: 850 }}>{WCTM_CAMPUS.title}</div>
+              <Badge tone="success">Official college pin</Badge>
+            </div>
+            <div className="muted" style={{ lineHeight: 1.6 }}>
+              {WCTM_CAMPUS.address}
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <span className="tag">Lat {WCTM_CAMPUS.lat}</span>
+              <span className="tag">Lon {WCTM_CAMPUS.lon}</span>
+              <span className="tag">Campus focus radius {WCTM_CAMPUS.radiusMeters} m</span>
+              <span className="tag">District: {safeStr(region?.district, "Gurugram")}</span>
+              {campusWard ? <span className="tag">Nearest ward: {safeStr(campusWard.ward_name, campusWard.ward_id)}</span> : null}
+            </div>
+            <div className="muted" style={{ fontSize: "0.875rem" }}>
+              Map sources: district boundary from backend district GeoJSON/topology, campus anchor from the official WCTM contact-page Google Maps pin.
+            </div>
+          </div>
+        ) : null}
+        {!isDelhiMode && !stationsInsideRegion.length && mapStationList.length ? (
+          <div className="card-flat" style={{ marginTop: 12, padding: 12 }}>
+            <div style={{ fontWeight: 800 }}>Sensor coverage for {safeStr(region?.district, "this region")}</div>
+            <div className="muted" style={{ marginTop: 6, lineHeight: 1.6 }}>
+              CPCB does not currently appear to expose a live station inside this district in the feed, so the map shows the nearest live stations around Gurugram while the ward AQI layer is still interpolated from those nearby measurements.
+            </div>
+          </div>
+        ) : null}
       </div>
 
       <div style={{ position: "relative" }}>
@@ -811,10 +976,10 @@ export default function ExplorePage() {
             url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
             attribution="&copy; OpenStreetMap &copy; CARTO"
           />
-          {isDelhiMode && boundaryGeo ? (
+          {boundaryGeo ? (
             <GeoJSON
               data={boundaryGeo}
-              style={() => ({ color: "#4fd1c5", weight: 2, fillOpacity: 0 })}
+              style={() => ({ color: isDelhiMode ? "#4fd1c5" : "#38bdf8", weight: isDelhiMode ? 2 : 2.4, fillOpacity: 0 })}
             />
           ) : null}
 
@@ -932,7 +1097,7 @@ export default function ExplorePage() {
             );
           }) : null}
 
-          {layers.sensors && stationList.map((s) => {
+          {layers.sensors && mapStationList.map((s) => {
             const aqi = safeNum(s.aqi, 0);
             const t = aqiTone(aqi);
             const derived = safeStr(s.aqi_mode, "").includes("derived");
@@ -964,6 +1129,37 @@ export default function ExplorePage() {
                 Your location
               </Tooltip>
             </CircleMarker>
+          ) : null}
+
+          {campusInView ? (
+            <>
+              <Circle
+                center={[WCTM_CAMPUS.lat, WCTM_CAMPUS.lon]}
+                radius={WCTM_CAMPUS.radiusMeters}
+                pathOptions={{ color: "#f59e0b", fillColor: "#f59e0b", fillOpacity: 0.08, weight: 2, dashArray: "8 8" }}
+              >
+                <Tooltip direction="top" offset={[0, -8]} opacity={0.97}>
+                  <div style={{ minWidth: 220 }}>
+                    <div style={{ fontWeight: 800 }}>{WCTM_CAMPUS.title}</div>
+                    <div>{WCTM_CAMPUS.address}</div>
+                    <div className="muted" style={{ marginTop: 4 }}>Campus zone highlight from official college map pin.</div>
+                  </div>
+                </Tooltip>
+              </Circle>
+              <CircleMarker
+                center={[WCTM_CAMPUS.lat, WCTM_CAMPUS.lon]}
+                radius={10}
+                pathOptions={{ color: "#fff7ed", fillColor: "#f59e0b", fillOpacity: 0.95, weight: 2 }}
+              >
+                <Tooltip direction="top" offset={[0, -8]} opacity={0.97}>
+                  <div style={{ minWidth: 220 }}>
+                    <div style={{ fontWeight: 800 }}>{WCTM_CAMPUS.shortTitle}</div>
+                    <div>{WCTM_CAMPUS.address}</div>
+                    {campusWard ? <div className="muted" style={{ marginTop: 4 }}>Nearest ward: {safeStr(campusWard.ward_name, campusWard.ward_id)}</div> : null}
+                  </div>
+                </Tooltip>
+              </CircleMarker>
+            </>
           ) : null}
 
           {layers.fires && (firePoints || []).map((f, idx) => (
@@ -1018,7 +1214,7 @@ export default function ExplorePage() {
         }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
           <div style={{ fontWeight: 850 }}>AQI legend</div>
-          <div className="muted" style={{ fontSize: 12 }}>{isDelhiMode ? "Delhi wards" : "Virtual wards"}</div>
+          <div className="muted" style={{ fontSize: 12 }}>{hasRealWardPolygons ? "Real wards" : (isDelhiMode ? "Delhi wards" : "Virtual wards")}</div>
           </div>
           <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             {[
@@ -1211,7 +1407,7 @@ export default function ExplorePage() {
             <div style={{ marginTop: 12 }}>
               <div style={{ fontWeight: 850, marginBottom: 6 }}>Nearest sensors used</div>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {selected.nearest.slice(0, 4).map((s, idx) => (
+                {selected.nearest.slice(0, MAX_NEAREST_SENSOR_DETAILS).map((s, idx) => (
                   <div key={idx} className="tag" style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{safeStr(s.station_name, "Sensor")}</span>
                     <span style={{ fontFamily: "var(--font-mono)" }}>{safeNum(s.distance_km, 0)} km</span>

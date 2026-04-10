@@ -210,6 +210,9 @@ def _normalize_ward_feature_collection(geo: dict[str, Any], city_id: str) -> dic
                 "WARD_NO",
                 "ward",
                 "WARD",
+                "code",
+                "Code",
+                "CODE",
                 "id",
                 "ID",
             ),
@@ -349,6 +352,15 @@ def _ward_geojson_from_db(city_id: str, db: Session) -> dict[str, Any] | None:
     return {"type": "FeatureCollection", "features": features}
 
 
+def _city_real_wards_geojson_path(city_id: str) -> str | None:
+    cid = _canonical_city_id(city_id)
+    if cid == "DELHI":
+        return settings.delhi_wards_geojson_path
+    if cid == "HARYANA_GURUGRAM":
+        return settings.gurugram_wards_geojson_path
+    return None
+
+
 def _ward_centroid(ward: Ward) -> tuple[float, float] | None:
     if ward.centroid_lat is not None and ward.centroid_lon is not None:
         return (float(ward.centroid_lat), float(ward.centroid_lon))
@@ -358,6 +370,37 @@ def _ward_centroid(ward: Ward) -> tuple[float, float] | None:
         geom = None
     if not geom:
         return None
+
+    def walk(coords: Any) -> list[tuple[float, float]]:
+        points: list[tuple[float, float]] = []
+        if isinstance(coords, (list, tuple)) and coords and isinstance(coords[0], (int, float)):
+            if len(coords) >= 2:
+                points.append((float(coords[0]), float(coords[1])))
+            return points
+        if isinstance(coords, (list, tuple)):
+            for c in coords:
+                points.extend(walk(c))
+        return points
+
+    pts = walk(geom.get("coordinates"))
+    if not pts:
+        return None
+    lon = sum(p[0] for p in pts) / len(pts)
+    lat = sum(p[1] for p in pts) / len(pts)
+    return (lat, lon)
+
+
+def _feature_centroid(feature: dict[str, Any]) -> tuple[float, float] | None:
+    props = dict(feature.get("properties") or {})
+    try:
+        lat = props.get("centroid_lat")
+        lon = props.get("centroid_lon")
+        if lat is not None and lon is not None:
+            return (float(lat), float(lon))
+    except Exception:
+        pass
+
+    geom = feature.get("geometry") or {}
 
     def walk(coords: Any) -> list[tuple[float, float]]:
         points: list[tuple[float, float]] = []
@@ -392,8 +435,30 @@ def _delhi_real_ward_geojson(db: Session) -> dict[str, Any] | None:
     return None
 
 
+def _city_real_ward_geojson(city_id: str, db: Session) -> dict[str, Any] | None:
+    cid = _canonical_city_id(city_id)
+    if cid == "DELHI":
+        return _delhi_real_ward_geojson(db)
+    try:
+        path = _city_real_wards_geojson_path(cid)
+        if path:
+            wards_geo = _load_geojson_file(path)
+            if _geojson_has_features(wards_geo):
+                return _normalize_ward_feature_collection(wards_geo, city_id=cid)
+    except Exception:
+        pass
+    db_geo = _ward_geojson_from_db(cid, db)
+    if _geojson_has_features(db_geo):
+        return db_geo
+    return None
+
+
 def _has_real_delhi_wards(db: Session) -> bool:
     return _delhi_real_ward_geojson(db) is not None
+
+
+def _has_real_city_wards(city_id: str, db: Session) -> bool:
+    return _city_real_ward_geojson(city_id, db) is not None
 
 @lru_cache(maxsize=8)
 def _load_geojson_file(path_str: str) -> dict:
@@ -663,6 +728,20 @@ def _load_live_stations_for_city(city_id: str, lat: float | None = None, lon: fl
         filter_city = "Delhi"
         api_limit = max(int(api_limit or 0), 100)
         api_max_pages = max(int(api_max_pages or 0), 5)
+    elif not filter_state and not filter_city and lat is not None and lon is not None:
+        try:
+            loc = LocationCollector().reverse_geocode(float(lat), float(lon))
+            state_name = str(loc.state or "").strip()
+            city_name = str(loc.city or "").strip()
+            district_name = str(loc.district or "").strip()
+            if state_name:
+                filter_state = state_name
+            if city_name:
+                filter_city = city_name
+            elif district_name:
+                filter_city = district_name
+        except Exception:
+            pass
 
     source = CpcbSource(
         mode=settings.cpcb_source_mode,
@@ -915,6 +994,86 @@ def _location_virtual_grid_geojson(city_id: str, lat: float, lon: float, grid_si
         "name": f"{city_prefix.lower()}_virtual_wards",
         "features": features,
     }
+
+
+def _rows_from_real_geojson(city_id: str, geo: dict[str, Any], lat: float | None = None, lon: float | None = None) -> list[dict[str, Any]]:
+    stations = None
+    try:
+        stations = _load_live_stations_for_city(city_id, lat=lat, lon=lon)
+    except Exception:
+        stations = None
+
+    rows: list[dict[str, Any]] = []
+    for feature in geo.get("features") or []:
+        if not isinstance(feature, dict):
+            continue
+        props = dict(feature.get("properties") or {})
+        ward_id = str(props.get("ward_id") or "").strip()
+        if not ward_id:
+            continue
+        ward_name = str(props.get("ward_name") or _ward_name_from_id(ward_id)).strip()
+        centroid = _feature_centroid(feature)
+        if centroid is None:
+            continue
+        centroid_lat, centroid_lon = centroid
+        row = {
+            "ward_id": ward_id,
+            "ward_name": ward_name,
+            "aqi": None,
+            "category": "Unknown",
+            "primary_pollutant": "",
+            "pm25": None,
+            "pm10": None,
+            "no2": None,
+            "so2": None,
+            "o3": None,
+            "co": None,
+            "sector": _real_sector(ward_id, ward_name),
+            "sensors_online": _real_sensors_online(ward_id, ward_name),
+            "centroid_lat": float(centroid_lat),
+            "centroid_lon": float(centroid_lon),
+            "has_snapshot": False,
+            "as_of_utc": None,
+            "estimated": True,
+            "estimate_method": "idw",
+            "estimate_source": settings.cpcb_source_mode,
+            "geom_feature": feature,
+        }
+        if stations:
+            c_lat = float(centroid_lat)
+            c_lon = float(centroid_lon)
+            pm25 = _idw_weighted(c_lat, c_lon, stations, "pm25")
+            pm10 = _idw_weighted(c_lat, c_lon, stations, "pm10")
+            no2 = _idw_weighted(c_lat, c_lon, stations, "no2")
+            so2 = _idw_weighted(c_lat, c_lon, stations, "so2")
+            o3 = _idw_weighted(c_lat, c_lon, stations, "o3")
+            co = _idw_weighted(c_lat, c_lon, stations, "co")
+            sub = {
+                "PM2.5": calc_sub_index(pm25, "pm25"),
+                "PM10": calc_sub_index(pm10, "pm10"),
+                "NO2": calc_sub_index(no2, "no2"),
+                "SO2": calc_sub_index(so2, "so2"),
+                "O3": calc_sub_index(o3, "o3"),
+                "CO": calc_sub_index(co, "co"),
+            }
+            primary = max(sub, key=sub.get)
+            aqi = _stabilize_estimated_aqi(c_lat, c_lon, stations, int(sub[primary]))
+            row.update(
+                {
+                    "aqi": aqi,
+                    "category": aqi_category(aqi),
+                    "primary_pollutant": primary,
+                    "pm25": round(pm25, 1),
+                    "pm10": round(pm10, 1),
+                    "no2": round(no2, 1),
+                    "so2": round(so2, 1),
+                    "o3": round(o3, 1),
+                    "co": round(co, 2),
+                    "live_anchor": _live_station_anchor(c_lat, c_lon, stations),
+                }
+            )
+        rows.append(row)
+    return rows
 
 
 def utc_now_iso() -> str:
@@ -1447,17 +1606,16 @@ def alerts(ward_id: str, db: Session = Depends(get_db)) -> dict:
 def ward_map_data(city_id: str = "DELHI", lat: float | None = None, lon: float | None = None, db: Session = Depends(get_db)) -> dict:
     context = _resolve_map_context(city_id, lat, lon)
     city_id = str(context.get("city_id") or _canonical_city_id(city_id))
-    delhi_has_real_wards = _has_real_delhi_wards(db) if city_id == "DELHI" else False
+    real_geo = _city_real_ward_geojson(city_id, db)
+    has_real_wards = _geojson_has_features(real_geo)
     use_virtual_wards = (
         lat is not None
         and lon is not None
-        and (
-            context.get("mode") in {"city", "district"}
-            or (city_id == "DELHI" and not delhi_has_real_wards)
-        )
+        and (context.get("mode") in {"city", "district"} or city_id == "DELHI")
+        and not has_real_wards
     )
-    wards = [] if use_virtual_wards else db.scalars(select(Ward).where(Ward.city_id == city_id).order_by(Ward.ward_id)).all()
-    rows = []
+    wards = [] if (use_virtual_wards or has_real_wards) else db.scalars(select(Ward).where(Ward.city_id == city_id).order_by(Ward.ward_id)).all()
+    rows = _rows_from_real_geojson(city_id, real_geo, lat=lat, lon=lon) if (has_real_wards and real_geo) else []
     # Load stations once (only if needed) so we can fill gaps for wards that have no snapshot yet.
     stations = None
     for ward in wards:
@@ -1704,12 +1862,40 @@ def geojson_location_boundary(lat: float, lon: float) -> dict:
             "source": context.get("boundary_source"),
             "data": district_feature_collection(feature),
         }
-    return geojson_delhi_boundary()
+    if context.get("mode") == "delhi":
+        return geojson_delhi_boundary()
+    return {
+        "timestamp": utc_now_iso(),
+        "city_id": context.get("city_id"),
+        "mode": context.get("mode"),
+        "region": {
+            "city": context.get("city_name"),
+            "district": context.get("district_name"),
+            "state": context.get("state_name"),
+        } if context.get("mode") in {"city", "district"} else None,
+        "source": context.get("boundary_source"),
+        "data": None,
+    }
 
 
 @router.get("/geojson/location-virtual-grid")
 def geojson_location_virtual_grid(lat: float, lon: float, grid_size: int = 25, db: Session = Depends(get_db)) -> dict:
     context = _resolve_map_context("DELHI", lat, lon)
+    resolved_city_id = str(context.get("city_id") or "LOCAL")
+    real_geo = _city_real_ward_geojson(resolved_city_id, db)
+    if _geojson_has_features(real_geo):
+        return {
+            "timestamp": utc_now_iso(),
+            "city_id": resolved_city_id,
+            "mode": "real",
+            "region": {
+                "city": context.get("city_name"),
+                "district": context.get("district_name"),
+                "state": context.get("state_name"),
+            } if context.get("mode") in {"delhi", "city", "district"} else None,
+            "source": _city_real_wards_geojson_path(resolved_city_id) or context.get("boundary_source"),
+            "data": real_geo,
+        }
     delhi_fallback = context.get("mode") == "delhi" and not _has_real_delhi_wards(db)
     if (context.get("mode") in {"city", "district"} or delhi_fallback) and (context.get("boundary_feature") or delhi_fallback):
         geo = _location_virtual_grid_geojson(str(context.get("city_id") or "LOCAL"), lat, lon, grid_size=max(4, min(grid_size, 100)))
@@ -1725,7 +1911,21 @@ def geojson_location_virtual_grid(lat: float, lon: float, grid_size: int = 25, d
             "source": context.get("boundary_source"),
             "data": geo,
         }
-    return geojson_delhi_wards_grid(db)
+    if context.get("mode") == "delhi":
+        return geojson_delhi_wards_grid(db)
+    geo = _location_virtual_grid_geojson(str(context.get("city_id") or "LOCAL"), lat, lon, grid_size=max(4, min(grid_size, 100)))
+    return {
+        "timestamp": utc_now_iso(),
+        "city_id": context.get("city_id"),
+        "mode": "virtual",
+        "region": {
+            "city": context.get("city_name"),
+            "district": context.get("district_name"),
+            "state": context.get("state_name"),
+        } if context.get("mode") in {"city", "district"} else None,
+        "source": context.get("boundary_source"),
+        "data": geo,
+    }
 
 
 @router.get("/debug/data-status")
@@ -1875,19 +2075,54 @@ def location_insights(
 
     context = _resolve_map_context(city_id, lat, lon)
     city_id = str(context.get("city_id") or _canonical_city_id(city_id))
-    if city_id == "DELHI" and not _has_real_delhi_wards(db):
+    real_geo = _city_real_ward_geojson(city_id, db)
+    has_real_wards = _geojson_has_features(real_geo)
+    if has_real_wards:
+        wards = []
+    elif city_id == "DELHI":
         wards = []
     else:
         wards = db.scalars(select(Ward).where(Ward.city_id == city_id).order_by(Ward.ward_id)).all()
+    if has_real_wards and real_geo:
+        ward_rows = []
+        for row in _rows_from_real_geojson(city_id, real_geo, lat=lat, lon=lon):
+            distance = _haversine_km(lat, lon, float(row["centroid_lat"]), float(row["centroid_lon"]))
+            ward_rows.append(
+                {
+                    "ward_id": row["ward_id"],
+                    "ward_name": row["ward_name"],
+                    "aqi": row["aqi"],
+                    "aqi_category": row["category"],
+                    "centroid_lat": float(row["centroid_lat"]),
+                    "centroid_lon": float(row["centroid_lon"]),
+                    "distance_km": round(distance, 2),
+                }
+            )
+        if ward_rows:
+            by_aqi = sorted(ward_rows, key=lambda x: x["aqi"], reverse=True)
+            rank_map = {row["ward_id"]: idx for idx, row in enumerate(by_aqi, start=1)}
+            by_distance = sorted(ward_rows, key=lambda x: x["distance_km"])
+            nearest = dict(by_distance[0])
+            nearest["city_rank"] = rank_map[nearest["ward_id"]]
+            top_n = max(1, min(top_n, 25))
+            return {
+                "timestamp": utc_now_iso(),
+                "city_id": city_id,
+                "mode": context.get("mode"),
+                "region": {
+                    "city": context.get("city_name"),
+                    "district": context.get("district_name"),
+                    "state": context.get("state_name"),
+                } if context.get("mode") in {"delhi", "city", "district"} else None,
+                "query_location": {"lat": round(lat, 6), "lon": round(lon, 6)},
+                "nearest_ward": nearest,
+                "nearby_wards": by_distance[:top_n],
+                "ranking": by_aqi[:top_n],
+                "total_wards": len(ward_rows),
+                "source": "real_ward_geojson",
+            }
     if not wards:
         dyn_rows = _idw_rows_for_location(city_id=city_id, lat=lat, lon=lon, grid_size=25)
-        resolved_city_id = city_id
-        source = "dynamic_idw"
-        if not dyn_rows and city_id != "DELHI":
-            dyn_rows = _idw_rows_for_location(city_id="DELHI", lat=lat, lon=lon, grid_size=25)
-            if dyn_rows:
-                resolved_city_id = "DELHI"
-                source = "dynamic_idw_city_fallback"
         if not dyn_rows:
             return {
                 "timestamp": utc_now_iso(),
@@ -1907,10 +2142,10 @@ def location_insights(
         nearest = dict(by_distance[0])
         nearest["city_rank"] = rank_map[nearest["ward_id"]]
         top_n = max(1, min(top_n, 25))
-        _persist_dynamic_grid(db, city_id=resolved_city_id, rows=dyn_rows)
+        _persist_dynamic_grid(db, city_id=city_id, rows=dyn_rows)
         return {
             "timestamp": utc_now_iso(),
-            "city_id": _sanitize_city_id(resolved_city_id),
+            "city_id": _sanitize_city_id(city_id),
             "mode": context.get("mode"),
             "region": {
                 "city": context.get("city_name"),
@@ -1922,7 +2157,7 @@ def location_insights(
             "nearby_wards": by_distance[:top_n],
             "ranking": by_aqi[:top_n],
             "total_wards": len(dyn_rows),
-            "source": source,
+            "source": "dynamic_idw",
         }
 
     ward_rows: list[dict] = []
@@ -2032,6 +2267,7 @@ def location_insights(
 
 @router.get("/alerts/feed")
 def alerts_feed(city_id: str = "DELHI", limit: int = 20, db: Session = Depends(get_db)) -> dict:
+    city_id = _canonical_city_id(city_id)
     wards = db.scalars(select(Ward).where(Ward.city_id == city_id)).all()
     if not wards:
         return {"timestamp": utc_now_iso(), "city_id": city_id, "count": 0, "data": []}
@@ -2255,6 +2491,7 @@ def disaster_status(city_id: str = "DELHI", db: Session = Depends(get_db)) -> di
 
 @router.get("/gov/recommendations")
 def gov_recommendations(city_id: str = "DELHI", db: Session = Depends(get_db)) -> dict:
+    city_id = _canonical_city_id(city_id)
     wards = db.scalars(select(Ward).where(Ward.city_id == city_id).order_by(Ward.ward_id)).all()
     actions = []
     for ward in wards:
@@ -2295,6 +2532,7 @@ def gov_recommendations(city_id: str = "DELHI", db: Session = Depends(get_db)) -
 
 @router.get("/complaints")
 def complaints(city_id: str = "DELHI", db: Session = Depends(get_db)) -> dict:
+    city_id = _canonical_city_id(city_id)
     _seed_default_complaints(db, city_id)
     rows = db.scalars(
         select(Complaint).where(Complaint.city_id == city_id).order_by(Complaint.updated_at_utc.desc(), Complaint.complaint_id.desc())
@@ -2542,8 +2780,21 @@ def stations_live(
 
     Used by the Explore Map UI for a realistic sensor layer.
     """
+    resolved_city_id = "DELHI"
+    resolved_region = None
+    if lat is not None and lon is not None:
+        try:
+            context = _resolve_map_context("DELHI", lat, lon)
+            resolved_city_id = str(context.get("city_id") or "DELHI")
+            resolved_region = {
+                "city": context.get("city_name"),
+                "district": context.get("district_name"),
+                "state": context.get("state_name"),
+            } if context.get("mode") in {"delhi", "city", "district"} else None
+        except Exception:
+            pass
     try:
-        live_rows = _load_live_stations_for_city("DELHI", lat=lat, lon=lon)
+        live_rows = _load_live_stations_for_city(resolved_city_id, lat=lat, lon=lon)
     except Exception:
         live_rows = []
 
@@ -2614,6 +2865,8 @@ def stations_live(
         freshness = "live" if age_minutes is not None and age_minutes <= 90 else "stale"
         return {
             "timestamp": utc_now_iso(),
+            "city_id": resolved_city_id,
+            "region": resolved_region,
             "ts_slot_utc": latest_ts.isoformat() if latest_ts else None,
             "age_minutes": age_minutes,
             "freshness": freshness,
@@ -2630,7 +2883,7 @@ def stations_live(
         ts_stmt = ts_stmt.where(CleanMeasurement.source.in_(accepted_sources))
     ts_slot = db.execute(ts_stmt).scalar_one()
     if ts_slot is None:
-        return {"timestamp": utc_now_iso(), "ts_slot_utc": None, "count": 0, "data": []}
+        return {"timestamp": utc_now_iso(), "city_id": resolved_city_id, "region": resolved_region, "ts_slot_utc": None, "count": 0, "data": []}
 
     has_api = (
         db.execute(
@@ -2755,6 +3008,8 @@ def stations_live(
     freshness = "live" if age_minutes <= 90 else "stale"
     return {
         "timestamp": utc_now_iso(),
+        "city_id": resolved_city_id,
+        "region": resolved_region,
         "ts_slot_utc": ts_slot.isoformat(),
         "age_minutes": age_minutes,
         "freshness": freshness,

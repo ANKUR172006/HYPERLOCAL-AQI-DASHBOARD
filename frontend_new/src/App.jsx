@@ -37,7 +37,7 @@ function AppBootScreen({ locationLabel, progressText, statusText }) {
           </div>
           <div>
             <div style={{ fontSize: '1.35rem', fontWeight: 900, color: 'var(--text-primary)' }}>Loading live AQI dashboard</div>
-            <div className="muted" style={{ marginTop: 4 }}>Preparing API data for {locationLabel || 'Delhi'} before the dashboard opens.</div>
+            <div className="muted" style={{ marginTop: 4 }}>Preparing AQI, map, and station data for {locationLabel || 'your location'} before the dashboard opens.</div>
           </div>
         </div>
         <div style={{ height: 10, borderRadius: 999, background: 'rgba(148,163,184,0.14)', overflow: 'hidden' }}>
@@ -66,21 +66,45 @@ export default function App() {
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
 
     let cancelled = false;
+    let bootFinished = false;
+    let fallbackTimer = 0;
+
+    const finishBoot = (completed, total) => {
+      if (cancelled || bootFinished) return;
+      bootFinished = true;
+      setBootState({ loading: false, completed, total: Math.max(total, completed) });
+      setBootDone(true);
+    };
+
     const runBootstrap = async () => {
+      let resolvedCityId = 'DELHI';
+      let locationBoundaryPayload = null;
+      let isDelhiContext = false;
+      try {
+        locationBoundaryPayload = await api.getLocationBoundary(lat, lon);
+        resolvedCityId = locationBoundaryPayload?.city_id || 'DELHI';
+        isDelhiContext = locationBoundaryPayload?.mode === 'delhi' || resolvedCityId === 'DELHI';
+      } catch {
+        resolvedCityId = 'DELHI';
+        isDelhiContext = true;
+      }
       const baseTasks = [
+        ['Location boundary', () => Promise.resolve(locationBoundaryPayload)],
         ['Location insights', () => api.getLocationInsights(lat, lon)],
         ['Ward map', () => api.getWardMap(lat, lon)],
-        ['Environment', () => api.getEnvironmentUnified(lat, lon, true)],
+        ['Environment', () => api.getEnvironmentUnified(lat, lon, false)],
         ['Stations', () => api.getStationsLive(lat, lon, 70, 8)],
-        ['Delhi boundary', () => api.getDelhiBoundary()],
-        ['Delhi wards', () => api.getDelhiWardsGrid()],
-        ['Alerts feed', () => api.getAlertsFeed(12)],
-        ['Recommendations', () => api.getGovRecommendations()],
+        ['Location grid', () => api.getLocationVirtualGrid(lat, lon, 25)],
+        ['Alerts feed', () => api.getAlertsFeed(12, resolvedCityId)],
+        ['Recommendations', () => api.getGovRecommendations(resolvedCityId)],
         ['Readiness', () => api.getReadiness()],
-        ['Complaints', () => api.getComplaints()],
-        ['Officer view', () => api.getDisasterOfficerView('DELHI', 15)],
-        ['Disaster status', () => api.getDisasterStatus('DELHI')],
+        ['Complaints', () => api.getComplaints(resolvedCityId)],
+        ['Officer view', () => api.getDisasterOfficerView(resolvedCityId, 15)],
+        ['Disaster status', () => api.getDisasterStatus(resolvedCityId)],
       ];
+      if (isDelhiContext) {
+        baseTasks.splice(5, 0, ['Delhi boundary', () => api.getDelhiBoundary()]);
+      }
 
       const setProgress = (completed, total) => {
         if (!cancelled) setBootState({ loading: true, completed, total });
@@ -101,8 +125,8 @@ export default function App() {
         }),
       );
 
-      const insightsPayload = baseResults[0]?.status === 'fulfilled' ? baseResults[0].value : null;
-      const wardMapPayload = baseResults[1]?.status === 'fulfilled' ? baseResults[1].value : null;
+      const insightsPayload = baseResults[1]?.status === 'fulfilled' ? baseResults[1].value : null;
+      const wardMapPayload = baseResults[2]?.status === 'fulfilled' ? baseResults[2].value : null;
       const wardId = insightsPayload?.nearest_ward?.ward_id || wardMapPayload?.data?.[0]?.ward_id || null;
 
       if (wardId) {
@@ -126,15 +150,17 @@ export default function App() {
         );
       }
 
-      if (!cancelled) {
-        setBootState({ loading: false, completed, total: Math.max(total, completed) });
-        setBootDone(true);
-      }
+      finishBoot(completed, total);
     };
+
+    fallbackTimer = window.setTimeout(() => {
+      finishBoot(bootState.completed, bootState.total || 1);
+    }, 20000);
 
     runBootstrap();
     return () => {
       cancelled = true;
+      if (fallbackTimer) window.clearTimeout(fallbackTimer);
     };
   }, [bootDone, location.lat, location.lon]);
 

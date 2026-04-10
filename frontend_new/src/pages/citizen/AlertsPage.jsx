@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useAlertsFeed, useAqiForecast, useAppLocation, useEnvironmentUnified, useLocationInsights, useStationsLive, useWardMap } from "../../hooks/index.js";
+import { useAlertsFeed, useAqiForecast, useAppLocation, useEnvironmentUnified, useLocationBoundary, useLocationInsights, useStationsLive, useWardMap } from "../../hooks/index.js";
 import { ApiStatusStrip, Badge, SectionHeader, Skeleton } from "../../components/ui/index.jsx";
 import { AlertItem } from "../../features/alerts/AlertsPreview.jsx";
 import { safeNum, safeStr } from "../../tokens/index.js";
@@ -27,15 +27,17 @@ function formatRelativeTime(isoLike, now = new Date()) {
 
 export default function AlertsPage() {
   const location = useAppLocation();
+  const locationBoundary = useLocationBoundary(location.lat, location.lon);
   const insights = useLocationInsights(location.lat, location.lon);
   const wardMap = useWardMap(location.lat, location.lon);
+  const activeCityId = safeStr(locationBoundary.data?.city_id, safeStr(wardMap.data?.city_id, safeStr(insights.data?.city_id, "DELHI")));
   const nearestWard = insights?.data?.nearest_ward || wardMap?.data?.data?.[0] || null;
   const wardId = nearestWard?.ward_id || null;
   const stations = useStationsLive(location.lat, location.lon, 12, 8);
   const env = useEnvironmentUnified(location.lat, location.lon, true);
   const forecast3h = useAqiForecast(wardId, 3);
 
-  const feed = useAlertsFeed();
+  const feed = useAlertsFeed(activeCityId);
   const feedItems = Array.isArray(feed.data?.data)
     ? feed.data.data
     : Array.isArray(feed.data?.alerts)

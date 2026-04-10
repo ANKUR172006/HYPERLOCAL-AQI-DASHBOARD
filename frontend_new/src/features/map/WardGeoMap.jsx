@@ -89,7 +89,7 @@ function pathsFromGeoJSON(geo, project) {
   return out;
 }
 
-export default function WardGeoMap({ boundary, wardGeojson, wards, loading, onSelect, selectedWardId = "", hotspots = [], legendLabel = "Zone map" }) {
+export default function WardGeoMap({ boundary, wardGeojson, wards, loading, onSelect, selectedWardId = "", hotspots = [], sensors = [], legendLabel = "Zone map" }) {
   const [selected, setSelected] = useState(null);
   const [hoveredId, setHoveredId] = useState(null);
   const [hoverPos, setHoverPos] = useState({ x: 0, y: 0 });
@@ -138,6 +138,19 @@ export default function WardGeoMap({ boundary, wardGeojson, wards, loading, onSe
 
   const boundaryPaths = useMemo(() => pathsFromGeoJSON(geo, project), [geo, project]);
   const wardPaths = useMemo(() => pathsFromGeoJSON(wardPoly, project), [wardPoly, project]);
+  const sensorRows = useMemo(() => {
+    const items = Array.isArray(sensors) ? sensors : [];
+    return items
+      .map((sensor) => ({
+        station_code: safeStr(sensor.station_code, ""),
+        station_name: safeStr(sensor.station_name, sensor.station_code),
+        lat: Number(sensor.lat),
+        lon: Number(sensor.lon),
+        aqi: safeNum(sensor.aqi, null),
+        dominant_pollutant: safeStr(sensor.dominant_pollutant, ""),
+      }))
+      .filter((sensor) => sensor.station_code && Number.isFinite(sensor.lat) && Number.isFinite(sensor.lon));
+  }, [sensors]);
 
   const maxAqi = useMemo(() => Math.max(1, ...rows.map((r) => (r.aqi == null ? 0 : r.aqi))), [rows]);
   const hovered = hoveredId ? byId[hoveredId] : null;
@@ -262,6 +275,37 @@ export default function WardGeoMap({ boundary, wardGeojson, wards, loading, onSe
           </g>
         )}
 
+        {!!sensorRows.length && (
+          <g>
+            {sensorRows.map((sensor) => {
+              const [x, y] = project(sensor.lon, sensor.lat);
+              const tone = aqiTone(sensor.aqi);
+              return (
+                <g key={`sensor-${sensor.station_code}`}>
+                  <circle
+                    cx={x}
+                    cy={y}
+                    r="8"
+                    fill={tone.color}
+                    fillOpacity="0.9"
+                    stroke="rgba(255,255,255,0.96)"
+                    strokeWidth="1.5"
+                  />
+                  <circle
+                    cx={x}
+                    cy={y}
+                    r="3"
+                    fill="rgba(255,255,255,0.98)"
+                  />
+                  <title>
+                    {`${sensor.station_name} - AQI ${sensor.aqi ?? "-"}${sensor.dominant_pollutant ? ` - ${sensor.dominant_pollutant}` : ""}`}
+                  </title>
+                </g>
+              );
+            })}
+          </g>
+        )}
+
         {/* Ward labels (subtle) */}
         {!!wardPaths.length && (
           <g clipPath="url(#delhiBoundaryClip)" pointerEvents="none">
@@ -330,6 +374,15 @@ export default function WardGeoMap({ boundary, wardGeojson, wards, loading, onSe
           <text x={view.w - 24} y={36} fontSize="12" textAnchor="end" fill="var(--text-muted)" fontFamily="var(--font-sans)">
             {legendLabel}
           </text>
+          {!!sensorRows.length && (
+            <g transform={`translate(${view.w - 180}, 52)`}>
+              <circle cx="0" cy="0" r="6" fill="#38bdf8" stroke="rgba(255,255,255,0.96)" strokeWidth="1.2" />
+              <circle cx="0" cy="0" r="2.2" fill="rgba(255,255,255,0.98)" />
+              <text x="12" y="4" fontSize="12" fill="var(--text-muted)" fontFamily="var(--font-sans)">
+                CPCB sensors
+              </text>
+            </g>
+          )}
         </g>
       </svg>
 

@@ -14,6 +14,7 @@ import {
   useLocationBoundary,
   useLocationVirtualGrid,
   useReadiness,
+  useStationsLive,
   useTrends,
   useWardMap,
 } from "../../hooks/index.js";
@@ -22,7 +23,6 @@ import Icon from "../../components/ui/Icon.jsx";
 import { Badge, SectionHeader, StatusCard } from "../../components/ui/index.jsx";
 import WardGeoMap from "../../features/map/WardGeoMap.jsx";
 
-const CITY_ID = "DELHI";
 const ACTION_LOG_STORAGE_KEY = "officer:action-log";
 const TABS = ["Overview", "Map", "Incidents", "Actions", "Complaints", "Trends"];
 
@@ -134,18 +134,20 @@ function ZoneCard({ row, active, onClick, extra }) {
 
 export default function OfficerPage({ onBack }) {
   const location = useAppLocation();
-  const readiness = useReadiness();
-  const alerts = useAlertsFeed();
-  const recommendations = useGovRecommendations();
-  const complaints = useComplaints();
+  const locationBoundary = useLocationBoundary(location.lat, location.lon);
   const wardMap = useWardMap(location.lat, location.lon);
-  const officerView = useAsync(() => api.getDisasterOfficerView(CITY_ID, 15), [], { refreshMs: APP_AUTO_REFRESH_MS });
-  const disasterStatus = useAsync(() => api.getDisasterStatus(CITY_ID), [], { refreshMs: APP_AUTO_REFRESH_MS });
+  const activeCityId = safeStr(locationBoundary.data?.city_id, safeStr(wardMap.data?.city_id, "DELHI"));
+  const readiness = useReadiness();
+  const alerts = useAlertsFeed(activeCityId);
+  const recommendations = useGovRecommendations(activeCityId);
+  const complaints = useComplaints(activeCityId);
+  const officerView = useAsync(() => api.getDisasterOfficerView(activeCityId, 15), [activeCityId], { refreshMs: APP_AUTO_REFRESH_MS });
+  const disasterStatus = useAsync(() => api.getDisasterStatus(activeCityId), [activeCityId], { refreshMs: APP_AUTO_REFRESH_MS });
   const firesNearby = useFiresNearby(location.lat, location.lon, 90, 2);
   const environment = useEnvironmentUnified(location.lat, location.lon, true);
+  const stations = useStationsLive(location.lat, location.lon, 120, 120);
   const delhiBoundary = useDelhiBoundary();
   const delhiWards = useDelhiWardsGrid();
-  const locationBoundary = useLocationBoundary(location.lat, location.lon);
   const locationGrid = useLocationVirtualGrid(location.lat, location.lon, 25);
 
   const [activeTab, setActiveTab] = useState("Overview");
@@ -159,6 +161,7 @@ export default function OfficerPage({ onBack }) {
   const mapBoundary = isDelhiMode ? delhiBoundary.data?.data : locationBoundary.data?.data;
   const mapGrid = isDelhiMode ? delhiWards.data?.data : locationGrid.data?.data;
   const fireHotspots = Array.isArray(firesNearby.data?.fires) ? firesNearby.data.fires : [];
+  const mapSensors = Array.isArray(stations.data?.data) ? stations.data.data : [];
 
   useEffect(() => { writeActionLog(actionLog); }, [actionLog]);
 
@@ -396,16 +399,17 @@ export default function OfficerPage({ onBack }) {
           <div className="card card-elevated" style={{ padding: 16 }}>
             <SectionHeader title="Interactive Zone Map" right={<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}><Badge tone="danger">{visibleHotspots.length} fire hotspots</Badge><Badge tone={activeLayer === "Density" ? "warning" : "info"}>{activeLayer} layer</Badge></div>} />
             <div className="muted" style={{ marginTop: 6, marginBottom: 12 }}>Click any ward to inspect AQI, density, risk, source, and trend.</div>
-            <StatusCard loading={wardMap.loading || (isDelhiMode ? delhiBoundary.loading || delhiWards.loading : locationBoundary.loading || locationGrid.loading)} error={wardMap.error || delhiBoundary.error || delhiWards.error || locationBoundary.error || locationGrid.error} retry={() => { wardMap.retry?.(); delhiBoundary.retry?.(); delhiWards.retry?.(); locationBoundary.retry?.(); locationGrid.retry?.(); }} empty={!zoneRows.length}>
+            <StatusCard loading={wardMap.loading || stations.loading || (isDelhiMode ? delhiBoundary.loading || delhiWards.loading : locationBoundary.loading || locationGrid.loading)} error={wardMap.error || stations.error || delhiBoundary.error || delhiWards.error || locationBoundary.error || locationGrid.error} retry={() => { wardMap.retry?.(); stations.retry?.(); delhiBoundary.retry?.(); delhiWards.retry?.(); locationBoundary.retry?.(); locationGrid.retry?.(); }} empty={!zoneRows.length}>
               <WardGeoMap
                 boundary={mapBoundary}
                 wardGeojson={mapGrid}
                 wards={zoneRows.map((row) => ({ ward_id: row.ward_id, ward_name: row.ward_name, aqi: activeLayer === "Density" ? Math.round(row.density_score * 5) : row.aqi, centroid_lat: row.centroid_lat, centroid_lon: row.centroid_lon, primary_pollutant: row.primary_pollutant, source_detection: row.source_detection, estimated: row.estimated, has_snapshot: !row.estimated, as_of_utc: row.as_of_utc }))}
                 loading={false}
                 hotspots={visibleHotspots}
+                sensors={mapSensors}
                 selectedWardId={selectedZone?.ward_id || ""}
                 onSelect={(row) => setSelectedWardId(row?.ward_id || "")}
-                legendLabel={isDelhiMode && delhiWards.data?.data ? "Delhi ward map" : "Ward heatmap"}
+                legendLabel={isDelhiMode && delhiWards.data?.data ? "Delhi ward map" : safeStr(locationGrid.data?.mode, "") === "real" ? "Real Gurugram ward map" : "District virtual ward heatmap"}
               />
             </StatusCard>
           </div>

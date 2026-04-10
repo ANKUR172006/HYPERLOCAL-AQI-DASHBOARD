@@ -1,7 +1,26 @@
 const API_BASE = "/v1";
+const DEFAULT_TIMEOUT_MS = 12000;
 
-async function getJson(path) {
-  const res = await fetch(`${API_BASE}${path}`);
+async function fetchWithTimeout(path, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(`${API_BASE}${path}`, {
+      ...options,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s`);
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+async function getJson(path, options = {}) {
+  const res = await fetchWithTimeout(path, {}, options.timeoutMs);
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(text || `HTTP ${res.status}`);
@@ -9,12 +28,12 @@ async function getJson(path) {
   return res.json();
 }
 
-async function postJson(path, body) {
-  const res = await fetch(`${API_BASE}${path}`, {
+async function postJson(path, body, options = {}) {
+  const res = await fetchWithTimeout(path, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body ?? {}),
-  });
+  }, options.timeoutMs);
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(text || `HTTP ${res.status}`);
@@ -22,12 +41,12 @@ async function postJson(path, body) {
   return res.json();
 }
 
-async function patchJson(path, body) {
-  const res = await fetch(`${API_BASE}${path}`, {
+async function patchJson(path, body, options = {}) {
+  const res = await fetchWithTimeout(path, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body ?? {}),
-  });
+  }, options.timeoutMs);
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(text || `HTTP ${res.status}`);
@@ -83,7 +102,9 @@ export const api = {
       lon: String(lon),
       refresh: refresh ? "true" : "false",
     });
-    return getJson(`/environment/unified?${qs.toString()}`);
+    return getJson(`/environment/unified?${qs.toString()}`, {
+      timeoutMs: refresh ? 18000 : DEFAULT_TIMEOUT_MS,
+    });
   },
   getStationsLive(lat, lon, radiusKm = 60, limit = 80) {
     const qs = new URLSearchParams({

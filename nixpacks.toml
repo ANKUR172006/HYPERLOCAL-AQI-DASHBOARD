@@ -1,7 +1,17 @@
-providers = ["python"]
+providers = ["node", "python"]
 
 [phases.install]
-cmds = ["pip install -r backend/requirements.txt"]
+cmds = [
+  "pip install -r backend/requirements.txt",
+  "npm --prefix frontend_new install"
+]
+
+[phases.build]
+cmds = [
+  "npm --prefix frontend_new run build",
+  "rm -rf backend/app/static/assets",
+  "cp -r frontend_new/dist/* backend/app/static/"
+]
 
 [start]
 cmd = "cd backend && python -m app.entrypoint"

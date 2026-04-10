@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.services import india_geo
 from app.db.session import SessionLocal
 from app.models.entities import AqiSnapshot, City, ForecastSnapshot, Ward
 from app.services.collectors.boundary_collector import BoundarySnapshot
@@ -267,6 +268,56 @@ def test_india_dynamic_map_endpoints_outside_delhi(monkeypatch):
         assert ward_map_body["city_id"] == boundary_body["city_id"]
         assert ward_map_body["ward_count"] >= 1
         assert ward_map_body["data"][0]["ward_id"].startswith(boundary_body["city_id"])
+
+
+def test_india_district_geojson_fallback_for_up(monkeypatch):
+    tmp_dir = Path(__file__).resolve().parent / "_tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    geojson_path = tmp_dir / "Uttar_Pradesh_Districts.geojson"
+    geojson_path.write_text(
+        json.dumps(
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "id": "Ghaziabad",
+                        "properties": {
+                            "d_id_11": 520,
+                            "Country": "INDIA",
+                            "Name": "Ghaziabad",
+                            "State": "Uttar Pradesh",
+                        },
+                        "geometry": {
+                            "type": "Polygon",
+                            "coordinates": [
+                                [
+                                    [77.0, 28.0],
+                                    [78.0, 28.0],
+                                    [78.0, 29.0],
+                                    [77.0, 29.0],
+                                    [77.0, 28.0],
+                                ]
+                            ],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("app.services.india_geo.settings.india_districts_topojson_path", str(tmp_dir / "missing.json"))
+    monkeypatch.setattr("app.services.india_geo.settings.up_districts_geojson_path", str(geojson_path))
+    india_geo.india_district_features.cache_clear()
+
+    try:
+        feature = india_geo.find_district_for_point(28.6, 77.4)
+        assert feature is not None
+        assert feature["properties"]["district"] == "Ghaziabad"
+        assert feature["properties"]["state"] == "Uttar Pradesh"
+        assert feature["properties"]["district_id"] == 520
+    finally:
+        india_geo.india_district_features.cache_clear()
 
 
 def test_delhi_real_ward_geojson_is_normalized(monkeypatch):

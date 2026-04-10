@@ -15,6 +15,8 @@ backend/__pycache__/
 backend/.pytest_cache/
 backend/*.log
 backend/*.db
+backend/*.db-shm
+backend/*.db-wal
 backend/uvicorn.out.log
 backend/uvicorn.err.log
 

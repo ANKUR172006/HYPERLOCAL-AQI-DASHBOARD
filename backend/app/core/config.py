@@ -36,11 +36,19 @@ def _default_delhi_wards_geojson_path() -> str:
     return str((_backend_dir() / "data" / "Delhi_Wards.geojson").resolve())
 
 
+def _default_gurugram_wards_geojson_path() -> str:
+    return str((_backend_dir() / "data" / "Gurugram_Wards.geojson").resolve())
+
+
 def _default_india_districts_topojson_path() -> str:
     preferred = Path.home() / "Downloads" / "india-districts-2019-734.json"
     if preferred.exists():
         return str(preferred.resolve())
     return str((_backend_dir() / "data" / "india-districts-2019-734.json").resolve())
+
+
+def _default_up_districts_geojson_path() -> str:
+    return str((_backend_dir() / "data" / "Uttar_Pradesh_Districts.geojson").resolve())
 
 
 class Settings(BaseSettings):
@@ -134,9 +142,17 @@ class Settings(BaseSettings):
         default_factory=_default_delhi_wards_geojson_path,
         validation_alias=AliasChoices("DELHI_WARDS_GEOJSON_PATH"),
     )
+    gurugram_wards_geojson_path: str = Field(
+        default_factory=_default_gurugram_wards_geojson_path,
+        validation_alias=AliasChoices("GURUGRAM_WARDS_GEOJSON_PATH"),
+    )
     india_districts_topojson_path: str = Field(
         default_factory=_default_india_districts_topojson_path,
         validation_alias=AliasChoices("INDIA_DISTRICTS_TOPOJSON_PATH"),
+    )
+    up_districts_geojson_path: str = Field(
+        default_factory=_default_up_districts_geojson_path,
+        validation_alias=AliasChoices("UP_DISTRICTS_GEOJSON_PATH"),
     )
 
 

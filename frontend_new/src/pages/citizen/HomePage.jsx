@@ -40,7 +40,7 @@ export default function HomePage({ onNavigate }) {
   const location = useAppLocation();
   const insights = useLocationInsights(location.lat, location.lon);
   const wardMap = useWardMap(location.lat, location.lon);
-  const env = useEnvironmentUnified(location.lat, location.lon, true);
+  const env = useEnvironmentUnified(location.lat, location.lon, false);
   const stations = useStationsLive(location.lat, location.lon, 70, 8);
 
   const nearestWardId = insights?.data?.nearest_ward?.ward_id || wardMap?.data?.data?.[0]?.ward_id || null;

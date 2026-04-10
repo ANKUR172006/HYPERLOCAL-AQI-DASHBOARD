@@ -112,12 +112,34 @@ def _topo_geometry_to_geojson(topology: dict[str, Any], geometry: dict[str, Any]
     return {"type": gtype or "GeometryCollection", "coordinates": []}
 
 
-@lru_cache(maxsize=1)
-def india_district_features() -> list[dict[str, Any]]:
-    path = Path(settings.india_districts_topojson_path)
-    if not path.is_file():
-        return []
-    topology = json.loads(path.read_text(encoding="utf-8"))
+def _normalized_feature(feature: dict[str, Any]) -> dict[str, Any]:
+    props = feature.get("properties") or {}
+    geometry = feature.get("geometry") or {}
+    district = (
+        props.get("district")
+        or props.get("Name")
+        or props.get("name")
+        or feature.get("id")
+    )
+    state = props.get("state") or props.get("State") or props.get("st_nm")
+    district_id = props.get("district_id") or props.get("d_id_11") or props.get("dt_code") or feature.get("id")
+    state_code = props.get("state_code") or props.get("st_code")
+    return {
+        "type": "Feature",
+        "properties": {
+            **props,
+            "district": district,
+            "state": state,
+            "district_id": district_id,
+            "state_code": state_code,
+        },
+        "geometry": geometry,
+        "bbox": _bbox_for_geometry(geometry),
+    }
+
+
+def _features_from_topology(path: Path) -> list[dict[str, Any]]:
+    topology = json.loads(path.read_text(encoding="utf-8-sig"))
     objects = topology.get("objects") or {}
     if not objects:
         return []
@@ -125,23 +147,43 @@ def india_district_features() -> list[dict[str, Any]]:
     features: list[dict[str, Any]] = []
     for geom in collection.get("geometries") or []:
         geo = _topo_geometry_to_geojson(topology, geom)
-        bbox = _bbox_for_geometry(geo)
         props = geom.get("properties") or {}
         features.append(
-            {
-                "type": "Feature",
-                "properties": {
-                    **props,
-                    "district": props.get("district"),
-                    "state": props.get("st_nm"),
-                    "district_id": props.get("dt_code"),
-                    "state_code": props.get("st_code"),
-                },
-                "geometry": geo,
-                "bbox": bbox,
-            }
+            _normalized_feature(
+                {
+                    "type": "Feature",
+                    "properties": {
+                        **props,
+                        "district": props.get("district"),
+                        "state": props.get("st_nm"),
+                        "district_id": props.get("dt_code"),
+                        "state_code": props.get("st_code"),
+                    },
+                    "geometry": geo,
+                }
+            )
         )
     return features
+
+
+def _features_from_geojson(path: Path) -> list[dict[str, Any]]:
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    if payload.get("type") != "FeatureCollection":
+        return []
+    return [_normalized_feature(feature) for feature in (payload.get("features") or []) if isinstance(feature, dict)]
+
+
+@lru_cache(maxsize=1)
+def india_district_features() -> list[dict[str, Any]]:
+    topo_path = Path(settings.india_districts_topojson_path)
+    if topo_path.is_file():
+        return _features_from_topology(topo_path)
+
+    up_geojson_path = Path(settings.up_districts_geojson_path)
+    if up_geojson_path.is_file():
+        return _features_from_geojson(up_geojson_path)
+
+    return []
 
 
 def find_district_for_point(lat: float, lon: float) -> dict[str, Any] | None:

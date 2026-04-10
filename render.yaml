@@ -16,7 +16,7 @@ services:
       - key: EXTERNAL_APIS_ENABLED
         value: "true"
       - key: CPCB_SOURCE_MODE
-        value: "api"
+        value: "hybrid"
       - key: ENABLE_EXTENDED_INGESTION
         value: "true"
       # For a single Render web service, keep the scheduler on so data stays fresh.
@@ -27,15 +27,15 @@ services:
       - key: FORECAST_MODEL
         value: "auto"
       - key: LIVE_DATA_STRICT
-        value: "true"
+        value: "false"
       - key: CPCB_FILTER_CITY
-        value: "Delhi"
+        value: ""
       - key: CPCB_FILTER_STATE
-        value: "Delhi"
+        value: ""
       - key: CPCB_API_LIMIT
         value: "100"
       - key: CPCB_API_MAX_PAGES
-        value: "4"
+        value: "6"
       - key: IDW_NEAREST_N
         value: "3"
       - key: IDW_RADIUS_KM

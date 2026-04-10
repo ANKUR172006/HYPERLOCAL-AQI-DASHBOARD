@@ -8,7 +8,6 @@
 **/dist/
 
 # Local data / logs
-backend/aqi.db
 **/*.log
 .git/
 .gitignore
@@ -19,4 +18,3 @@ pytest-cache-files-*/
 # OS files
 **/.DS_Store
 **/Thumbs.db
-
