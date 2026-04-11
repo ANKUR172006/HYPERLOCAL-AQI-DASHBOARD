@@ -61,7 +61,7 @@ function buildPollutionReason(ward) {
   const hotspot = ward.hotspot_location;
   const parts = [];
   parts.push(`Likely driven by ${primary.toLowerCase()}.`);
-  if (secondary && !secondary.includes("—")) parts.push(`Secondary signal points to ${secondary.toLowerCase()}.`);
+  if (secondary && !secondary.includes("-")) parts.push(`Secondary signal points to ${secondary.toLowerCase()}.`);
   if (reasons[0]) parts.push(reasons[0] + ".");
   if (hotspot?.place_name) parts.push(`Nearest strong measured hotspot is ${safeStr(hotspot.place_name, "nearby")} (${safeNum(hotspot.distance_km, 0)} km away).`);
   return parts.join(" ");
@@ -479,8 +479,8 @@ export default function ExplorePage() {
       ? ageMinutes
       : Math.max(0, Math.round((Date.now() - new Date(tsSlot).getTime()) / 60000));
     if (!Number.isFinite(mins)) return { txt: "Using last known data", tone: "warning" };
-    if (freshness === "stale") return { txt: `Using cached CPCB data · ${mins} min old`, tone: "warning" };
-    return { txt: `Live Air Quality Data · Updated ${mins} min ago`, tone: "success" };
+    if (freshness === "stale") return { txt: `Using cached CPCB data | ${mins} min old`, tone: "warning" };
+    return { txt: `Live Air Quality Data | Updated ${mins} min ago`, tone: "success" };
   }, [ageMinutes, freshness, tsSlot]);
 
   const locationMode = safeStr(locationBoundary.data?.mode, safeStr(wardMap.data?.mode, safeStr(locationInsights.data?.mode, "delhi")));
@@ -853,7 +853,7 @@ export default function ExplorePage() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-        <SectionHeader title={`Explore Map — ${regionLabel || "India"}`} />
+        <SectionHeader title={`Explore Map - ${regionLabel || "India"}`} />
         <Badge tone={liveLabel.tone}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
             <span style={{ width: 8, height: 8, borderRadius: 999, background: liveLabel.tone === "success" ? "var(--success)" : "var(--warning)" }} />
@@ -906,13 +906,13 @@ export default function ExplorePage() {
           <Badge tone="info"><Icon name={location.mode === "search" ? "search" : location.mode === "device" ? "eye" : "flag"} size={14} /> {location.mode === "search" ? "Searched" : location.mode === "device" ? "Device" : "Default"}</Badge>
           {location.geo?.error && location.mode !== "search" ? <Badge tone="warning">GPS off: {safeStr(location.geo.error, "disabled")}</Badge> : null}
           <Badge tone="info">{activeLocationLabel}</Badge>
-          {campusInView ? <Badge tone="success">{WCTM_CAMPUS.shortTitle} · {distanceToCampusKm.toFixed(1)} km</Badge> : null}
+          {campusInView ? <Badge tone="success">{WCTM_CAMPUS.shortTitle} | {distanceToCampusKm.toFixed(1)} km</Badge> : null}
           {isDelhiMode ? (
             <label className="tag" style={{ cursor: "pointer" }}>
               <input type="checkbox" checked={focusNewDelhi} onChange={(e) => setFocusNewDelhi(e.target.checked)} /> District focus: {safeStr(region?.district, "Delhi district")}
             </label>
           ) : (
-            <Badge tone="info">{safeStr(region?.district, "Detected district")} · {safeStr(region?.state, "India")}</Badge>
+            <Badge tone="info">{safeStr(region?.district, "Detected district")} | {safeStr(region?.state, "India")}</Badge>
           )}
           {!isDelhiMode ? (
             <Badge tone={stationsInsideRegion.length ? "success" : "warning"}>
@@ -936,7 +936,7 @@ export default function ExplorePage() {
           </label>
           {searchedWardId ? <Badge tone="warning">Search ward: {safeStr(searchedWard?.ward_name, searchedWardId)}</Badge> : null}
           {(stations.loading || boundary.loading || wardsGrid.loading || newDelhiBoundary.loading || locationBoundary.loading || locationGrid.loading || wardMap.loading) ? <Skeleton height="14px" width="220px" /> : null}
-          {(stations.error || boundary.error || wardsGrid.error || newDelhiBoundary.error || locationBoundary.error || locationGrid.error || wardMap.error) ? <span className="muted">Some layers unavailable — using last known values.</span> : null}
+          {(stations.error || boundary.error || wardsGrid.error || newDelhiBoundary.error || locationBoundary.error || locationGrid.error || wardMap.error) ? <span className="muted">Some layers unavailable - using last known values.</span> : null}
         </div>
         {campusInView ? (
           <div className="card-flat" style={{ marginTop: 12, padding: 12, display: "grid", gap: 8 }}>
@@ -1048,7 +1048,7 @@ export default function ExplorePage() {
                     fillOpacity: Number.isFinite(aqi) ? (isSearchMatch ? 0.8 : isSelectedWard ? 0.82 : 0.68) : 0,
                   }),
                 });
-                layer.bindTooltip(`${wardName}${isPragatiMaidan ? " · Pragati Maidan" : ""} — AQI ${aqi}${dom ? ` · ${dom}` : ""}`, {
+                layer.bindTooltip(`${wardName}${isPragatiMaidan ? " | Pragati Maidan" : ""} - AQI ${aqi}${dom ? ` | ${dom}` : ""}`, {
                   sticky: true,
                   opacity: 0.9,
                 });
@@ -1073,7 +1073,7 @@ export default function ExplorePage() {
               >
                 <Tooltip permanent direction="center" className="ward-label" opacity={1}>
                   <span style={{ borderColor: `${t.color}55` }}>
-                    {safeStr(w.ward_name, w.ward_id)} · {aqi}
+                    {safeStr(w.ward_name, w.ward_id)} | {aqi}
                   </span>
                 </Tooltip>
               </CircleMarker>
@@ -1113,8 +1113,8 @@ export default function ExplorePage() {
                 <Tooltip direction="top" offset={[0, -6]} opacity={0.95}>
                   <div style={{ minWidth: 180 }}>
                     <div style={{ fontWeight: 800 }}>{safeStr(s.station_name, s.station_code)}</div>
-                    <div>{derived ? "Derived AQI" : "AQI"}: <b>{aqi}</b> · {safeStr(s.dominant_pollutant, "-")}</div>
-                    <div className="muted">Data Source: {safeStr(s.source, "CPCB")}{derived ? " · from CPCB pollutants" : ""}</div>
+                    <div>{derived ? "Derived AQI" : "AQI"}: <b>{aqi}</b> | {safeStr(s.dominant_pollutant, "-")}</div>
+                    <div className="muted">Data Source: {safeStr(s.source, "CPCB")}{derived ? " | from CPCB pollutants" : ""}</div>
                   </div>
                 </Tooltip>
               </CircleMarker>
@@ -1195,7 +1195,7 @@ export default function ExplorePage() {
                 }}
               >
                 <Tooltip sticky opacity={0.9}>
-                  AQI {cell.aqi} · {cell.dominant}
+                  AQI {cell.aqi} | {cell.dominant}
                 </Tooltip>
               </Rectangle>
             );
@@ -1402,7 +1402,7 @@ export default function ExplorePage() {
                 </span>
               </div>
               <div className="muted" style={{ marginTop: 8, lineHeight: 1.6 }}>
-                Why: {safeStr(selected.source.reasons?.[0], "—")}
+                Why: {safeStr(selected.source.reasons?.[0], "-")}
               </div>
             </div>
 

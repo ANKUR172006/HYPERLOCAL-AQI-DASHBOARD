@@ -161,7 +161,7 @@ export default function HomePage({ onNavigate }) {
               )}
               <div className="mini-s">
                 {nearestStation
-                  ? `${safeStr(nearestStation?.station_name, "Unknown station")}${Number.isFinite(stationAgeMinutes) ? ` · ${stationAgeMinutes} min old` : ""}`
+                  ? `${safeStr(nearestStation?.station_name, "Unknown station")}${Number.isFinite(stationAgeMinutes) ? ` | ${stationAgeMinutes} min old` : ""}`
                   : nearestWard
                     ? `Using ${safeStr(nearestWard.ward_name, nearestWard.ward_id)} virtual ward estimate`
                     : "No live CPCB station resolved yet"}
@@ -275,7 +275,7 @@ export default function HomePage({ onNavigate }) {
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 8 }}>
                 {fires.slice(0, 4).map((f, idx) => (
                   <span key={idx} className="tag" style={{ fontFamily: "var(--font-mono)" }}>
-                    {safeNum(f?.lat, 0).toFixed(4)}, {safeNum(f?.lon, 0).toFixed(4)} · {safeStr(f?.confidence, "-")}
+                    {safeNum(f?.lat, 0).toFixed(4)}, {safeNum(f?.lon, 0).toFixed(4)} | {safeStr(f?.confidence, "-")}
                   </span>
                 ))}
               </div>

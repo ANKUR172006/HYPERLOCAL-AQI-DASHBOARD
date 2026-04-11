@@ -148,7 +148,7 @@ export default function AppLayout({ page, onNavigate, theme, onThemeToggle, chil
               </button>
             </form>
             <div className="muted" style={{ fontSize: "0.8125rem", marginTop: 6, textAlign: "right" }}>
-              Current: {resolvedLabel} · {locationModeLabel}
+              Current: {resolvedLabel} | {locationModeLabel}
             </div>
             {(results.length || error) ? (
               <div style={{
