@@ -185,7 +185,7 @@ class EnvironmentalIngestionService:
         recent_loc = self._nearest_recent_location(lat, lon)
         recent_sat = self._nearest_recent_satellite(lat, lon)
         recent_weather = self._nearest_recent_weather(lat, lon)
-        recent_pollution = self.db.scalars(select(PollutionReading).order_by(PollutionReading.ts_utc.desc())).first()
+        recent_pollution = self._nearest_recent_pollution(lat, lon)
         if self._should_refresh(lat, lon, recent_loc, recent_weather, recent_sat):
             return self.ingest_for_coordinates(lat, lon)
         station_name = ""
@@ -258,6 +258,21 @@ class EnvironmentalIngestionService:
         if not rows:
             return None
         return min(rows, key=lambda row: _haversine_km(lat, lon, float(row.latitude), float(row.longitude)))
+
+    def _nearest_recent_pollution(self, lat: float, lon: float) -> PollutionReading | None:
+        rows = self.db.execute(
+            select(PollutionReading, Station)
+            .join(Station, Station.station_id == PollutionReading.station_id)
+            .order_by(PollutionReading.ts_utc.desc())
+            .limit(50)
+        ).all()
+        if not rows:
+            return None
+        best_reading, _ = min(
+            rows,
+            key=lambda item: _haversine_km(lat, lon, float(item[1].latitude), float(item[1].longitude)),
+        )
+        return best_reading
 
     def _should_refresh(
         self,

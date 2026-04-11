@@ -3,11 +3,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from app.main import app
 from app.services import india_geo
 from app.db.session import SessionLocal
-from app.models.entities import AqiSnapshot, City, ForecastSnapshot, Ward
+from app.models.entities import AqiSnapshot, City, ForecastSnapshot, PollutionReading, Station, Ward
 from app.services.collectors.boundary_collector import BoundarySnapshot
 from app.services.cpcb_source import StationObservation
 
@@ -150,6 +151,67 @@ def test_analytics_trends_endpoint():
         assert len(body["data"]["hourly"]) == 24
         assert len(body["data"]["weekly"]) == 7
         assert body["data"]["source"] == "database_history"
+
+
+def test_analytics_trends_falls_back_to_nearest_station_history():
+    city_id = "TESTCITY_TRENDS"
+    ward_id = "TEST_WARD_TRENDS_001"
+
+    db = SessionLocal()
+    try:
+        if db.get(City, city_id) is None:
+            db.add(City(city_id=city_id, city_name="Trend City", state_name="Trend State", timezone="UTC"))
+        if db.get(Ward, ward_id) is None:
+            db.add(
+                Ward(
+                    ward_id=ward_id,
+                    city_id=city_id,
+                    ward_name="Trend Ward",
+                    population=1,
+                    sensitive_sites_count=0,
+                    centroid_lat=28.50,
+                    centroid_lon=77.10,
+                )
+            )
+        station = db.scalars(select(Station).where(Station.station_code == "trend_station")).first()
+        if station is None:
+            station = Station(
+                station_code="trend_station",
+                station_name="Trend Station",
+                city="Trend City",
+                state="Trend State",
+                latitude=28.5005,
+                longitude=77.1005,
+                source="TEST",
+            )
+            db.add(station)
+            db.flush()
+        db.query(PollutionReading).filter(PollutionReading.station_id == station.station_id).delete()
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        for offset in range(4):
+            db.add(
+                PollutionReading(
+                    station_id=station.station_id,
+                    ts_utc=now - timedelta(hours=offset),
+                    pm25=80 + offset,
+                    pm10=120 + offset,
+                    no2=35 + offset,
+                    so2=10 + offset,
+                    co=0.7,
+                    o3=25 + offset,
+                    source="TEST",
+                )
+            )
+        db.commit()
+    finally:
+        db.close()
+
+    with TestClient(app) as client:
+        response = client.get("/v1/analytics/trends", params={"ward_id": ward_id})
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["data"]["hourly"]) == 24
+        assert body["data"]["source"] == "database_history+station_fallback"
 
 
 def test_alerts_feed_recommendations_and_complaints():

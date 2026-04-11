@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app.core.errors import AppError
 from app.core.config import settings
 from app.db.session import get_db
-from app.models.entities import AqiSnapshot, City, CleanMeasurement, Complaint, CrisisEvent, DisasterAssessment, ForecastSnapshot, SatelliteData, Station, Ward, WeatherData
+from app.models.entities import AqiSnapshot, City, CleanMeasurement, Complaint, CrisisEvent, DisasterAssessment, ForecastSnapshot, PollutionReading, SatelliteData, Station, Ward, WeatherData
 from app.services.cpcb_source import CpcbSource
 from app.services.cpcb_source import StationObservation
 from app.services.cpcb_station_counts import fetch_cpcb_station_counts
@@ -1226,6 +1226,81 @@ def _latest_disaster_assessment(db: Session, ward_id: str) -> DisasterAssessment
     ).first()
 
 
+def _trend_series_from_station_history(db: Session, ward_id: str, now: datetime) -> dict[str, Any] | None:
+    ward = db.get(Ward, ward_id)
+    if ward is None:
+        return None
+    centroid = _ward_centroid(ward)
+    if centroid is None:
+        return None
+    stations = db.scalars(select(Station)).all()
+    if not stations:
+        return None
+    nearest_station = min(
+        stations,
+        key=lambda station: _haversine_km(float(centroid[0]), float(centroid[1]), float(station.latitude), float(station.longitude)),
+    )
+    readings = db.scalars(
+        select(PollutionReading)
+        .where(PollutionReading.station_id == nearest_station.station_id, PollutionReading.ts_utc >= now - timedelta(hours=24))
+        .order_by(PollutionReading.ts_utc.asc())
+    ).all()
+    if not readings:
+        return None
+
+    by_hour: dict[str, dict[str, float | int]] = {}
+    for row in readings:
+        pm25 = float(row.pm25 or 0.0)
+        pm10 = float(row.pm10 or 0.0)
+        no2 = float(row.no2 or 0.0)
+        so2 = float(row.so2 or 0.0)
+        o3 = float(row.o3 or 0.0)
+        co = float(row.co or 0.0)
+        sub = {
+            "PM2.5": calc_sub_index(pm25, "pm25"),
+            "PM10": calc_sub_index(pm10, "pm10"),
+            "NO2": calc_sub_index(no2, "no2"),
+            "SO2": calc_sub_index(so2, "so2"),
+            "O3": calc_sub_index(o3, "o3"),
+            "CO": calc_sub_index(co, "co"),
+        }
+        aqi = int(max(sub.values()) if sub else 0)
+        by_hour[row.ts_utc.strftime("%Y-%m-%d %H")] = {
+            "aqi": aqi,
+            "pm25": pm25,
+            "pm10": pm10,
+            "no2": no2,
+            "so2": so2,
+            "o3": o3,
+            "co": co,
+        }
+
+    hourly = []
+    for offset in range(23, -1, -1):
+        t = now - timedelta(hours=offset)
+        key = t.strftime("%Y-%m-%d %H")
+        slot = by_hour.get(key)
+        hourly.append(
+            {
+                "h": t.strftime("%H"),
+                "aqi": int(slot["aqi"]) if slot else None,
+                "pm25": round(float(slot["pm25"]), 1) if slot else None,
+                "pm10": round(float(slot["pm10"]), 1) if slot else None,
+                "no2": round(float(slot["no2"]), 1) if slot else None,
+                "so2": round(float(slot["so2"]), 1) if slot else None,
+                "o3": round(float(slot["o3"]), 1) if slot else None,
+                "co": round(float(slot["co"]), 2) if slot else None,
+            }
+        )
+
+    return {
+        "hourly": hourly,
+        "weekly": [],
+        "source": "nearest_station_history",
+        "station_name": nearest_station.station_name,
+    }
+
+
 def _assessment_card(assessment: DisasterAssessment | None) -> dict | None:
     if assessment is None:
         return None
@@ -2304,10 +2379,18 @@ def analytics_trends(ward_id: str, db: Session = Depends(get_db)) -> dict:
     current = db.scalars(
         select(AqiSnapshot).where(AqiSnapshot.ward_id == ward_id).order_by(AqiSnapshot.ts_utc.desc())
     ).first()
-    if current is None:
-        raise AppError("DATA_NOT_READY", f"No AQI snapshot available for {ward_id}.", 404)
-
     now = datetime.now(timezone.utc)
+    if current is None:
+        station_fallback = _trend_series_from_station_history(db, ward_id, now)
+        if station_fallback is None:
+            raise AppError("DATA_NOT_READY", f"No AQI snapshot available for {ward_id}.", 404)
+        return envelope(
+            ward_id=ward_id,
+            disaster_mode=False,
+            quality_score=0.72,
+            data=station_fallback,
+        )
+
     last_24h = db.scalars(
         select(AqiSnapshot)
         .where(AqiSnapshot.ward_id == ward_id, AqiSnapshot.ts_utc >= now - timedelta(hours=24))
@@ -2367,11 +2450,26 @@ def analytics_trends(ward_id: str, db: Session = Depends(get_db)) -> dict:
         else:
             weekly.append({"d": day.strftime("%a").upper()[:3], "aqi": None, "pm25": None, "pm10": None, "date_utc": day.isoformat()})
 
+    payload = {
+        "hourly": hourly,
+        "weekly": weekly,
+        "source": "database_history",
+    }
+    populated_hourly = sum(1 for item in hourly if item.get("aqi") is not None)
+    if populated_hourly <= 1:
+        station_fallback = _trend_series_from_station_history(db, ward_id, now)
+        if station_fallback is not None:
+            payload = {
+                **station_fallback,
+                "weekly": weekly,
+                "source": "database_history+station_fallback",
+            }
+
     return envelope(
         ward_id=ward_id,
         disaster_mode=current.aqi_value > 300,
         quality_score=current.data_quality_score,
-        data={"hourly": hourly, "weekly": weekly, "source": "database_history"},
+        data=payload,
     )
 
 

@@ -28,7 +28,7 @@ export default function TrendsPage() {
   const forecast1h = useAqiForecast(wardId, 1);
   const forecast2h = useAqiForecast(wardId, 2);
   const forecast3h = useAqiForecast(wardId, 3);
-  const env = useEnvironmentUnified(location.lat, location.lon, true);
+  const env = useEnvironmentUnified(location.lat, location.lon, false);
   const stations = useStationsLive(location.lat, location.lon, 12, 8);
   const [metric, setMetric] = useState("aqi");
 
@@ -195,8 +195,8 @@ export default function TrendsPage() {
           <div>
             <div style={{ fontWeight: 800 }}>24-hour zone history</div>
             <div className="muted" style={{ marginTop: 4 }}>
-              {stats.min != null ? `Min ${stats.min} · Max ${stats.max} · Avg ${stats.avg}` : "No history yet (needs a few pipeline cycles)."}
-              {stats.spike ? ` · Spike ${stats.spike.delta > 0 ? "+" : ""}${Math.round(stats.spike.delta)} at ${stats.spike.at}:00` : ""}
+              {stats.min != null ? `Min ${stats.min} | Max ${stats.max} | Avg ${stats.avg}` : "No history yet (needs a few pipeline cycles)."}
+              {stats.spike ? ` | Spike ${stats.spike.delta > 0 ? "+" : ""}${Math.round(stats.spike.delta)} at ${stats.spike.at}:00` : ""}
             </div>
           </div>
           <Badge tone="info">Zone model</Badge>
