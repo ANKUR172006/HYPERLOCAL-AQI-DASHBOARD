@@ -6,7 +6,7 @@ import {
   useStationsLive,
   useWardMap,
 } from "../../hooks/index.js";
-import { aqiTone, safeNum, safeStr } from "../../tokens/index.js";
+import { aqiTone, safeLocationLabel, safeNum, safeStr } from "../../tokens/index.js";
 import Icon from "../../components/ui/Icon.jsx";
 import { ApiStatusStrip, Badge, SectionHeader, Skeleton } from "../../components/ui/index.jsx";
 
@@ -54,11 +54,14 @@ export default function HomePage({ onNavigate }) {
 
   const weather = env.data?.data?.weather || {};
   const region = insights?.data?.region || wardMap?.data?.region || null;
-  const locationLabel = safeStr(
+  const regionLabel = [safeLocationLabel(region?.city, ""), safeLocationLabel(region?.district, ""), safeLocationLabel(region?.state, "")]
+    .filter(Boolean)
+    .join(", ");
+  const locationLabel = safeLocationLabel(
     env.data?.data?.location?.locality,
-    safeStr(
+    safeLocationLabel(
       env.data?.data?.location?.city,
-      [safeStr(region?.city, ""), safeStr(region?.district, ""), safeStr(region?.state, "")].filter(Boolean).join(", ") || "Current location",
+      safeLocationLabel(location.label, regionLabel || "WCTM College, Gurugram"),
     ),
   );
   const primaryPollutant = safeStr(

@@ -15,7 +15,7 @@ import {
 } from "../../hooks/index.js";
 import { Badge, SectionHeader, Skeleton } from "../../components/ui/index.jsx";
 import Icon from "../../components/ui/Icon.jsx";
-import { aqiTone, safeNum, safeStr } from "../../tokens/index.js";
+import { aqiTone, safeLocationLabel, safeNum, safeStr } from "../../tokens/index.js";
 import { api } from "../../utils/api.js";
 
 const DEFAULT_CENTER = { lat: 28.4440009, lon: 76.7709646 }; // WCTM College campus, Gurugram
@@ -486,7 +486,7 @@ export default function ExplorePage() {
   const locationMode = safeStr(locationBoundary.data?.mode, safeStr(wardMap.data?.mode, safeStr(locationInsights.data?.mode, "delhi")));
   const isDelhiMode = locationMode === "delhi";
   const region = locationBoundary.data?.region || locationInsights.data?.region || null;
-  const delhiRegionLabel = [safeStr(region?.district, ""), safeStr(region?.city, "Delhi")].filter(Boolean).join(", ");
+  const delhiRegionLabel = [safeLocationLabel(region?.district, ""), safeLocationLabel(region?.city, "Delhi")].filter(Boolean).join(", ");
   const boundaryGeo = isDelhiMode ? (locationBoundary.data?.data || boundary.data?.data || null) : (locationBoundary.data?.data || null);
   const newDelhiGeo = newDelhiBoundary.data?.data || null;
   const wardsGeo = isDelhiMode ? (wardsGrid.data?.data || locationGrid.data?.data || null) : (locationGrid.data?.data || null);
@@ -662,9 +662,11 @@ export default function ExplorePage() {
   );
   const campusInView = distanceToCampusKm <= WCTM_CAMPUS.focusKm || safeStr(locationBoundary.data?.city_id, "").includes("GURUGRAM");
   const regionLabel = isDelhiMode
-    ? safeStr(delhiRegionLabel, "Delhi")
-    : (campusInView ? `${WCTM_CAMPUS.shortTitle} Region` : [safeStr(region?.city, ""), safeStr(region?.district, ""), safeStr(region?.state, "India")].filter(Boolean).join(", "));
-  const activeLocationLabel = !isDelhiMode && campusInView ? `${WCTM_CAMPUS.shortTitle} campus region` : safeStr(location.label, regionLabel || "Selected location");
+    ? safeLocationLabel(delhiRegionLabel, "Delhi")
+    : (campusInView ? `${WCTM_CAMPUS.shortTitle} Region` : [safeLocationLabel(region?.city, ""), safeLocationLabel(region?.district, ""), safeLocationLabel(region?.state, "India")].filter(Boolean).join(", "));
+  const activeLocationLabel = !isDelhiMode && campusInView
+    ? `${WCTM_CAMPUS.shortTitle} campus region`
+    : safeLocationLabel(location.label, regionLabel || "WCTM College, Gurugram");
   const campusRegionBounds = useMemo(
     () => bboxFromCenterKm(WCTM_CAMPUS.lat, WCTM_CAMPUS.lon, WCTM_CAMPUS.regionFocusKm),
     [],

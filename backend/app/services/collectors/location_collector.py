@@ -12,6 +12,34 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _normalize_place_name(value: str) -> str:
+    text = str(value or "").strip()
+    upper = text.upper()
+    if upper in {"GURGAON", "GURUGRAM"}:
+        return "Gurugram"
+    if upper in {"DELHI NCT", "NCT OF DELHI", "NEW DELHI"}:
+        return "Delhi"
+    return text
+
+
+def _normalized_location_fields(addr: dict) -> tuple[str, str, str, str, str, str, str]:
+    city = _normalize_place_name(str(addr.get("city") or addr.get("town") or addr.get("municipality") or ""))
+    district = _normalize_place_name(str(addr.get("state_district") or addr.get("county") or ""))
+    locality = str(addr.get("suburb") or addr.get("neighbourhood") or "")
+    ward = str(addr.get("city_district") or addr.get("ward") or "")
+    sublocality = str(addr.get("quarter") or addr.get("hamlet") or "")
+    state = _normalize_place_name(str(addr.get("state") or ""))
+    country = str(addr.get("country") or "")
+
+    if not city and district.upper() in {"GURGAON", "GURUGRAM"}:
+        city = "Gurugram"
+    if not district and city.upper() == "GURUGRAM":
+        district = "Gurugram"
+    if not state and (city.upper() == "GURUGRAM" or district.upper() == "GURUGRAM"):
+        state = "Haryana"
+    return city, district, locality, ward, sublocality, state, country
+
+
 @dataclass
 class LocationSnapshot:
     latitude: float
@@ -35,13 +63,7 @@ class LocationCollector:
         try:
             payload = get_json_with_retry(settings.nominatim_base_url, params=params, headers=headers)
             addr = payload.get("address", {}) if isinstance(payload, dict) else {}
-            city = str(addr.get("city") or addr.get("town") or addr.get("municipality") or "")
-            district = str(addr.get("state_district") or addr.get("county") or "")
-            locality = str(addr.get("suburb") or addr.get("neighbourhood") or "")
-            ward = str(addr.get("city_district") or addr.get("ward") or "")
-            sublocality = str(addr.get("quarter") or addr.get("hamlet") or "")
-            state = str(addr.get("state") or "")
-            country = str(addr.get("country") or "")
+            city, district, locality, ward, sublocality, state, country = _normalized_location_fields(addr)
             return LocationSnapshot(
                 latitude=lat,
                 longitude=lon,
@@ -120,15 +142,16 @@ class LocationCollector:
             except Exception:
                 continue
             addr = item.get("address", {}) if isinstance(item.get("address"), dict) else {}
+            city, district, _, _, _, state, country = _normalized_location_fields(addr)
             results.append(
                 {
                     "display_name": str(item.get("display_name") or f"{lat:.6f}, {lon:.6f}"),
                     "lat": round(lat, 6),
                     "lon": round(lon, 6),
-                    "city": str(addr.get("city") or addr.get("town") or addr.get("municipality") or ""),
-                    "district": str(addr.get("state_district") or addr.get("county") or ""),
-                    "state": str(addr.get("state") or ""),
-                    "country": str(addr.get("country") or ""),
+                    "city": city,
+                    "district": district,
+                    "state": state,
+                    "country": country,
                     "source": "NOMINATIM_SEARCH",
                 }
             )

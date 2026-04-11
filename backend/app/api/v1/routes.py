@@ -672,6 +672,7 @@ def _resolve_map_context(city_id: str, lat: float | None, lon: float | None) -> 
             "mode": "district",
             "district_feature": district,
             "boundary_feature": district,
+            "city_name": district_name,
             "district_name": district_name,
             "state_name": state_name,
             "boundary_source": "topojson_district",

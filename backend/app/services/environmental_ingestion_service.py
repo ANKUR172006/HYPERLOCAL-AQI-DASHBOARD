@@ -41,6 +41,25 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
+def _preferred_city_name(*candidates: str) -> str:
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if not text:
+            continue
+        if text.lower() in {"unknown city", "unknown", "na", "n/a"}:
+            continue
+        return text
+    return "WCTM College, Gurugram"
+
+
+def _preferred_ward_name(*candidates: str) -> str:
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return "WCTM College campus"
+
+
 @dataclass
 class UnifiedEnvironmentalRecord:
     location: dict[str, Any]
@@ -80,7 +99,11 @@ class EnvironmentalIngestionService:
         )
 
         station_row = self._upsert_station(nearest, loc)
-        city_name = loc.city or loc.district or (nearest.station_name.split(",")[1].strip() if nearest and "," in nearest.station_name else "") or "Unknown City"
+        city_name = _preferred_city_name(
+            loc.city,
+            loc.district,
+            (nearest.station_name.split(",")[1].strip() if nearest and "," in nearest.station_name else ""),
+        )
         reading_ts = align_to_hour(nearest.observed_at_utc if nearest else _utc_now())
         if station_row:
             self._insert_pollution_reading(station_row.station_id, pollution_vec, reading_ts, nearest)
@@ -91,7 +114,7 @@ class EnvironmentalIngestionService:
         self._insert_location(loc)
         self.db.commit()
 
-        ward_name = loc.ward or loc.sublocality or "Unknown ward"
+        ward_name = _preferred_ward_name(loc.ward, loc.sublocality, loc.locality)
         det = detect_pollution_sources(
             pollutants={
                 "pm25": pollution_vec.pm25,
@@ -169,7 +192,11 @@ class EnvironmentalIngestionService:
         if recent_pollution:
             station = self.db.get(Station, recent_pollution.station_id)
             station_name = station.station_name if station else ""
-        city_name = (recent_loc.city if recent_loc else "") or (recent_loc.district if recent_loc else "") or "Unknown City"
+        city_name = _preferred_city_name(
+            recent_loc.city if recent_loc else "",
+            recent_loc.district if recent_loc else "",
+            recent_loc.locality if recent_loc else "",
+        )
         fires = self.firms.fetch_nearby(lat=lat, lon=lon, radius_km=10.0, days=1)
         return UnifiedEnvironmentalRecord(
             location={
@@ -177,7 +204,11 @@ class EnvironmentalIngestionService:
                 "state": recent_loc.state if recent_loc else "",
                 "district": recent_loc.district if recent_loc else "",
                 "locality": recent_loc.locality if recent_loc else "",
-                "ward": (recent_loc.ward if recent_loc else "") or (recent_loc.sublocality if recent_loc else ""),
+                "ward": _preferred_ward_name(
+                    recent_loc.ward if recent_loc else "",
+                    recent_loc.sublocality if recent_loc else "",
+                    recent_loc.locality if recent_loc else "",
+                ),
                 "coordinates": {"lat": round(lat, 6), "lon": round(lon, 6)},
             },
             pollution={

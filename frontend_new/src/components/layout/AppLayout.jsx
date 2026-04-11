@@ -2,6 +2,7 @@ import { useState } from "react";
 import Icon from "../ui/Icon.jsx";
 import { useAppLocation, useLocationBoundary } from "../../hooks/index.js";
 import { api } from "../../utils/api.js";
+import { safeLocationLabel } from "../../tokens/index.js";
 
 const NAV = [
   { id: "home", label: "Home", icon: "home" },
@@ -20,10 +21,10 @@ export default function AppLayout({ page, onNavigate, theme, onThemeToggle, chil
   const [error, setError] = useState("");
   const region = locationBoundary.data?.region || null;
   const resolvedLabel = [
-    String(region?.district || "").trim(),
-    String(region?.city || "").trim(),
-    String(region?.state || "").trim(),
-  ].filter(Boolean).join(", ") || location.label;
+    safeLocationLabel(region?.district, ""),
+    safeLocationLabel(region?.city, ""),
+    safeLocationLabel(region?.state, ""),
+  ].filter(Boolean).join(", ") || safeLocationLabel(location.label, "WCTM College, Gurugram");
   const locationModeLabel =
     location.hasSelectedLocation ? "searched" : location.mode === "device" ? "live GPS" : location.mode === "demo" ? "campus fallback" : "default";
 

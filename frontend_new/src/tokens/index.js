@@ -8,6 +8,16 @@ export function safeStr(value, fallback = "") {
   return s.trim() ? s : fallback;
 }
 
+export function safeLocationLabel(value, fallback = "") {
+  const s = safeStr(value, "");
+  if (!s) return fallback;
+  const normalized = s.trim().toLowerCase();
+  if (["unknown", "unknown city", "unknown ward", "n/a", "na"].includes(normalized)) {
+    return fallback;
+  }
+  return s;
+}
+
 const AQI = [
   { max: 50, label: "Good", color: "var(--aqi-good)", bg: "var(--aqi-good-bg)", text: "var(--aqi-good-text)", icon: "check-circle", description: "Air quality is satisfactory." },
   { max: 100, label: "Moderate", color: "var(--aqi-moderate)", bg: "var(--aqi-moderate-bg)", text: "var(--aqi-moderate-text)", icon: "info", description: "Acceptable; some pollutants may affect sensitive groups." },
